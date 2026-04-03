@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solar EV Charger Controller</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-6 max-w-6xl">
+        <h1 class="text-2xl font-bold mb-6">Solar EV Charger Controller</h1>
+
+        <!-- Real-time Panel -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <!-- Solar Data -->
+            <div class="bg-gray-800 rounded-lg p-4">
+                <h2 class="text-lg font-semibold mb-3 text-yellow-400">Solar Production</h2>
+                <div class="space-y-2">
+                    <div class="flex justify-between">
+                        <span>PV Generation</span>
+                        <span id="pvWatts" class="font-mono text-yellow-300">-- W</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>Grid Import/Export</span>
+                        <span id="gridWatts" class="font-mono">-- W</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>Home Load</span>
+                        <span id="loadWatts" class="font-mono text-blue-300">-- W</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>Surplus Available</span>
+                        <span id="surplusWatts" class="font-mono text-green-400">-- W</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charging Data -->
+            <div class="bg-gray-800 rounded-lg p-4">
+                <h2 class="text-lg font-semibold mb-3 text-blue-400">EV Charging</h2>
+                <div class="space-y-2">
+                    <div class="flex justify-between">
+                        <span>Controller State</span>
+                        <span id="state" class="font-mono">--</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>Charging State</span>
+                        <span id="chargingState" class="font-mono">--</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>Target / Actual Amps</span>
+                        <span><span id="targetAmps" class="font-mono">--</span> / <span id="actualAmps" class="font-mono">--</span> A</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>Battery</span>
+                        <span id="batteryPct" class="font-mono text-green-400">-- %</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>Car Online</span>
+                        <span id="carOnline" class="font-mono">--</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>Car Plugged In</span>
+                        <span id="carPluggedIn" class="font-mono">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <h2 class="text-lg font-semibold mb-3">Controls</h2>
+            <div class="flex flex-wrap gap-3 items-center">
+                <div class="flex items-center gap-2">
+                    <span>Mode:</span>
+                    <span id="currentMode" class="font-mono font-bold text-green-400">auto</span>
+                    <button onclick="setMode('auto')" class="px-3 py-1 bg-green-700 hover:bg-green-600 rounded text-sm">Auto</button>
+                    <button onclick="setMode('manual')" class="px-3 py-1 bg-yellow-700 hover:bg-yellow-600 rounded text-sm">Manual</button>
+                </div>
+                <div class="border-l border-gray-600 pl-3 flex items-center gap-2">
+                    <button onclick="controlAction('start')" class="px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-sm">Start</button>
+                    <button onclick="controlAction('stop')" class="px-3 py-1 bg-red-700 hover:bg-red-600 rounded text-sm">Stop</button>
+                    <input type="number" id="ampsInput" min="5" max="32" value="10" class="w-16 px-2 py-1 bg-gray-700 rounded text-sm">
+                    <button onclick="setAmps()" class="px-3 py-1 bg-purple-700 hover:bg-purple-600 rounded text-sm">Set Amps</button>
+                </div>
+            </div>
+            <div id="controlStatus" class="mt-2 text-sm text-gray-400"></div>
+        </div>
+
+        <!-- History Panel -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <h2 class="text-lg font-semibold mb-3">History</h2>
+            <div class="flex flex-wrap gap-3 items-end mb-3">
+                <div>
+                    <label class="block text-xs text-gray-400">From</label>
+                    <input type="datetime-local" id="histFrom" class="px-2 py-1 bg-gray-700 rounded text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400">To</label>
+                    <input type="datetime-local" id="histTo" class="px-2 py-1 bg-gray-700 rounded text-sm">
+                </div>
+                <div class="flex gap-2">
+                    <label class="text-sm"><input type="radio" name="interval" value="minute" checked> Min</label>
+                    <label class="text-sm"><input type="radio" name="interval" value="hour"> Hour</label>
+                    <label class="text-sm"><input type="radio" name="interval" value="day"> Day</label>
+                </div>
+                <button onclick="loadHistory()" class="px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-sm">Load</button>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="text-left text-gray-400 border-b border-gray-700">
+                            <th class="py-1 px-2">Time</th>
+                            <th class="py-1 px-2">PV (W)</th>
+                            <th class="py-1 px-2">Grid (W)</th>
+                            <th class="py-1 px-2">Load (W)</th>
+                            <th class="py-1 px-2">Surplus (W)</th>
+                            <th class="py-1 px-2">Amps</th>
+                            <th class="py-1 px-2">Battery</th>
+                            <th class="py-1 px-2">State</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyBody" class="font-mono text-xs"></tbody>
+                </table>
+            </div>
+            <div class="flex gap-2 mt-2">
+                <button id="histPrev" onclick="loadHistory(-1)" class="px-2 py-1 bg-gray-700 rounded text-xs hidden">Prev</button>
+                <button id="histNext" onclick="loadHistory(1)" class="px-2 py-1 bg-gray-700 rounded text-xs hidden">Next</button>
+            </div>
+        </div>
+
+        <!-- Charge Sessions -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <h2 class="text-lg font-semibold mb-3">Charge Sessions</h2>
+            <button onclick="loadSessions()" class="px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-sm mb-2">Load Sessions</button>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="text-left text-gray-400 border-b border-gray-700">
+                            <th class="py-1 px-2">Start</th>
+                            <th class="py-1 px-2">End</th>
+                            <th class="py-1 px-2">Duration</th>
+                            <th class="py-1 px-2">Battery</th>
+                            <th class="py-1 px-2">Energy (kWh)</th>
+                            <th class="py-1 px-2">Peak A</th>
+                            <th class="py-1 px-2">Avg A</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessionsBody" class="font-mono text-xs"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Search -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <h2 class="text-lg font-semibold mb-3">Search Events</h2>
+            <input type="text" id="searchInput" placeholder="Search events..."
+                   class="w-full px-3 py-2 bg-gray-700 rounded mb-2"
+                   oninput="debounceSearch()">
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="text-left text-gray-400 border-b border-gray-700">
+                            <th class="py-1 px-2">Time</th>
+                            <th class="py-1 px-2">Type</th>
+                            <th class="py-1 px-2">Message</th>
+                        </tr>
+                    </thead>
+                    <tbody id="searchBody" class="font-mono text-xs"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="text-center text-xs text-gray-600 mt-4">
+            Last update: <span id="lastUpdate">--</span>
+        </div>
+    </div>
+
+    <script>
+        // Set default date range for history.
+        const now = new Date();
+        const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        document.getElementById('histFrom').value = yesterday.toISOString().slice(0, 16);
+        document.getElementById('histTo').value = now.toISOString().slice(0, 16);
+
+        let histOffset = 0;
+        const histLimit = 100;
+
+        // SSE connection.
+        const evtSource = new EventSource('/events');
+        evtSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            updateDashboard(data);
+        };
+        evtSource.onerror = function() {
+            document.getElementById('state').textContent = 'disconnected';
+            document.getElementById('state').className = 'font-mono text-red-400';
+        };
+
+        function updateDashboard(d) {
+            document.getElementById('pvWatts').textContent = Math.round(d.pvWatts) + ' W';
+            document.getElementById('gridWatts').textContent = Math.round(d.gridWatts) + ' W';
+            const gridEl = document.getElementById('gridWatts');
+            gridEl.className = d.gridWatts < 0 ? 'font-mono text-green-400' : 'font-mono text-red-400';
+            document.getElementById('loadWatts').textContent = Math.round(d.loadWatts) + ' W';
+            document.getElementById('surplusWatts').textContent = Math.round(d.surplusWatts) + ' W';
+            document.getElementById('state').textContent = d.state;
+            document.getElementById('chargingState').textContent = d.chargingState || '--';
+            document.getElementById('targetAmps').textContent = d.targetAmps;
+            document.getElementById('actualAmps').textContent = d.actualAmps;
+            document.getElementById('batteryPct').textContent = d.batteryPct.toFixed(1) + ' %';
+            document.getElementById('carOnline').textContent = d.carOnline ? 'Yes' : 'No';
+            document.getElementById('carPluggedIn').textContent = d.carPluggedIn ? 'Yes' : 'No';
+            document.getElementById('currentMode').textContent = d.mode;
+            document.getElementById('lastUpdate').textContent = new Date(d.lastUpdate).toLocaleTimeString();
+
+            // Color state.
+            const stateEl = document.getElementById('state');
+            const colors = {
+                'charging': 'text-green-400', 'idle': 'text-gray-400',
+                'monitoring': 'text-yellow-400', 'stopped_low_surplus': 'text-orange-400',
+                'wake_pending': 'text-blue-400', 'error': 'text-red-400'
+            };
+            stateEl.className = 'font-mono ' + (colors[d.state] || '');
+        }
+
+        // Initial state fetch.
+        fetch('/api/state').then(r => r.json()).then(updateDashboard).catch(() => {});
+
+        async function setMode(mode) {
+            const res = await fetch('/api/mode', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode})
+            });
+            const data = await res.json();
+            document.getElementById('controlStatus').textContent = res.ok ? 'Mode set to ' + mode : data.error;
+        }
+
+        async function controlAction(action) {
+            const res = await fetch('/api/control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action})
+            });
+            const data = await res.json();
+            document.getElementById('controlStatus').textContent = res.ok ? action + ' sent' : data.error;
+        }
+
+        async function setAmps() {
+            const amps = parseInt(document.getElementById('ampsInput').value);
+            const res = await fetch('/api/control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'setAmps', amps})
+            });
+            const data = await res.json();
+            document.getElementById('controlStatus').textContent = res.ok ? 'Set to ' + amps + 'A' : data.error;
+        }
+
+        async function loadHistory(direction) {
+            if (direction === -1) histOffset = Math.max(0, histOffset - histLimit);
+            else if (direction === 1) histOffset += histLimit;
+            else histOffset = 0;
+
+            const from = new Date(document.getElementById('histFrom').value).toISOString();
+            const to = new Date(document.getElementById('histTo').value).toISOString();
+            const interval = document.querySelector('input[name="interval"]:checked').value;
+
+            const url = `/api/history?from=${from}&to=${to}&interval=${interval}&limit=${histLimit}&offset=${histOffset}`;
+            const res = await fetch(url);
+            const readings = await res.json();
+
+            const tbody = document.getElementById('historyBody');
+            tbody.innerHTML = readings.map(r => `
+                <tr class="border-b border-gray-800 hover:bg-gray-750">
+                    <td class="py-1 px-2">${new Date(r.Timestamp).toLocaleString()}</td>
+                    <td class="py-1 px-2">${Math.round(r.PVWatts)}</td>
+                    <td class="py-1 px-2">${Math.round(r.GridWatts)}</td>
+                    <td class="py-1 px-2">${Math.round(r.LoadWatts)}</td>
+                    <td class="py-1 px-2">${Math.round(r.SurplusWatts)}</td>
+                    <td class="py-1 px-2">${r.ChargeAmps}</td>
+                    <td class="py-1 px-2">${r.BatteryPct.toFixed(1)}%</td>
+                    <td class="py-1 px-2">${r.State}</td>
+                </tr>
+            `).join('');
+
+            document.getElementById('histPrev').classList.toggle('hidden', histOffset === 0);
+            document.getElementById('histNext').classList.toggle('hidden', readings.length < histLimit);
+        }
+
+        async function loadSessions() {
+            const res = await fetch('/api/sessions');
+            const sessions = await res.json();
+
+            const tbody = document.getElementById('sessionsBody');
+            tbody.innerHTML = sessions.map(s => {
+                const start = new Date(s.StartTime);
+                const end = s.EndTime ? new Date(s.EndTime) : null;
+                const duration = end ? Math.round((end - start) / 60000) + ' min' : 'ongoing';
+                return `
+                    <tr class="border-b border-gray-800 hover:bg-gray-750">
+                        <td class="py-1 px-2">${start.toLocaleString()}</td>
+                        <td class="py-1 px-2">${end ? end.toLocaleString() : '--'}</td>
+                        <td class="py-1 px-2">${duration}</td>
+                        <td class="py-1 px-2">${s.StartBattery.toFixed(0)}% -> ${s.EndBattery.toFixed(0)}%</td>
+                        <td class="py-1 px-2">${s.EnergyKWh.toFixed(2)}</td>
+                        <td class="py-1 px-2">${s.PeakAmps}</td>
+                        <td class="py-1 px-2">${s.AvgAmps.toFixed(1)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        let searchTimer;
+        function debounceSearch() {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(doSearch, 300);
+        }
+
+        async function doSearch() {
+            const q = document.getElementById('searchInput').value.trim();
+            if (!q) {
+                document.getElementById('searchBody').innerHTML = '';
+                return;
+            }
+            const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            const events = await res.json();
+
+            const tbody = document.getElementById('searchBody');
+            tbody.innerHTML = events.map(e => `
+                <tr class="border-b border-gray-800 hover:bg-gray-750">
+                    <td class="py-1 px-2">${new Date(e.Timestamp).toLocaleString()}</td>
+                    <td class="py-1 px-2">${e.Type}</td>
+                    <td class="py-1 px-2">${e.Message}</td>
+                </tr>
+            `).join('');
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,565 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"math"
+	"sync"
+	"time"
+
+	"github.com/cbellee/solar-ev-charger/internal/config"
+	"github.com/cbellee/solar-ev-charger/internal/inverter"
+	"github.com/cbellee/solar-ev-charger/internal/observability"
+	"github.com/cbellee/solar-ev-charger/internal/storage"
+	"github.com/cbellee/solar-ev-charger/internal/tesla"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
+
+// State represents the controller's current operating state.
+type State string
+
+const (
+	StateIdle              State = "idle"
+	StateMonitoring        State = "monitoring"
+	StateCharging          State = "charging"
+	StateStoppedLowSurplus State = "stopped_low_surplus"
+	StateWakePending       State = "wake_pending"
+	StateError             State = "error"
+)
+
+// Mode represents the operating mode.
+type Mode string
+
+const (
+	ModeAuto   Mode = "auto"
+	ModeManual Mode = "manual"
+)
+
+// StateSnapshot is a point-in-time snapshot for the web UI.
+type StateSnapshot struct {
+	State              State     `json:"state"`
+	Mode               Mode      `json:"mode"`
+	PVWatts            float64   `json:"pvWatts"`
+	GridWatts          float64   `json:"gridWatts"`
+	LoadWatts          float64   `json:"loadWatts"`
+	SurplusWatts       float64   `json:"surplusWatts"`
+	TargetAmps         int       `json:"targetAmps"`
+	ActualAmps         int       `json:"actualAmps"`
+	BatteryPct         float64   `json:"batteryPct"`
+	CarPluggedIn       bool      `json:"carPluggedIn"`
+	CarOnline          bool      `json:"carOnline"`
+	ChargingState      string    `json:"chargingState"`
+	ConsecutiveLow     int       `json:"consecutiveLow"`
+	ConsecutiveSurplus int       `json:"consecutiveSurplus"`
+	LastUpdate         time.Time `json:"lastUpdate"`
+	LastError          string    `json:"lastError"`
+}
+
+// Controller manages the solar-to-EV charging logic.
+type Controller struct {
+	inverter inverter.InverterReader
+	vehicle  tesla.VehicleController
+	store    storage.Store
+	cfg      config.Config
+	logger   *slog.Logger
+	metrics  *observability.Metrics
+
+	mu                 sync.RWMutex
+	state              State
+	mode               Mode
+	snapshot           StateSnapshot
+	consecutiveLow     int
+	consecutiveSurplus int
+	lastChargeAmps     int
+	lastKnownPluggedIn bool
+
+	accumulator     []accSample
+	currentMinute   time.Time
+	activeSessionID int64
+	sessionEnergy   float64
+	sessionPeakAmps int
+	sessionAmpTotal int64
+	sessionSamples  int
+
+	OnUpdate func(StateSnapshot)
+}
+
+type accSample struct {
+	pvWatts      float64
+	gridWatts    float64
+	loadWatts    float64
+	surplusWatts float64
+	chargeAmps   int
+	batteryPct   float64
+	state        State
+}
+
+var tracer = otel.Tracer("controller")
+
+// New creates a new Controller.
+func New(inv inverter.InverterReader, veh tesla.VehicleController, store storage.Store,
+	cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) *Controller {
+	return &Controller{
+		inverter: inv,
+		vehicle:  veh,
+		store:    store,
+		cfg:      cfg,
+		logger:   logger,
+		metrics:  metrics,
+		state:    StateIdle,
+		mode:     ModeAuto,
+	}
+}
+
+// Run starts the control loop, blocking until ctx is cancelled.
+func (c *Controller) Run(ctx context.Context) {
+	ticker := time.NewTicker(c.cfg.PollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			c.logger.InfoContext(ctx, "controller stopped")
+			c.mu.RLock()
+			isCharging := c.state == StateCharging
+			c.mu.RUnlock()
+			if isCharging {
+				_ = c.vehicle.StopCharging(context.Background())
+			}
+			c.flushMinuteAverage(ctx)
+			return
+		case <-ticker.C:
+			c.Tick(ctx)
+		}
+	}
+}
+
+// Tick performs one iteration of the control loop.
+func (c *Controller) Tick(ctx context.Context) {
+	ctx, span := tracer.Start(ctx, "controller.Tick")
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		if c.metrics != nil {
+			c.metrics.PollDuration.Record(ctx, time.Since(start).Seconds())
+		}
+	}()
+
+	// Step 1: Read solar data.
+	power, err := c.inverter.GetPowerData(ctx)
+	if err != nil {
+		c.logger.ErrorContext(ctx, "inverter read failed", "error", err)
+		c.transitionTo(ctx, StateError, err.Error())
+		return
+	}
+
+	// Step 2: Read vehicle state.
+	chargeState, err := c.vehicle.GetChargeState(ctx)
+	if err != nil {
+		if err == tesla.ErrCarOffline {
+			chargeState = tesla.ChargeState{IsOnline: false}
+		} else {
+			c.logger.ErrorContext(ctx, "tesla read failed", "error", err)
+			c.transitionTo(ctx, StateError, err.Error())
+			return
+		}
+	}
+	c.updateKnownPlugState(chargeState)
+	c.recordSessionSample(chargeState)
+
+	// Step 3: Check preconditions.
+	if !chargeState.PluggedIn && chargeState.IsOnline {
+		c.transitionTo(ctx, StateIdle, "car not plugged in")
+		c.resetCounters()
+		c.updateSnapshot(power, chargeState, 0)
+		c.accumulateSample(power, chargeState, 0, ctx)
+		if c.OnUpdate != nil {
+			c.OnUpdate(c.GetStateSnapshot())
+		}
+		return
+	}
+	if !chargeState.IsOnline && !c.shouldAttemptWake() {
+		c.transitionTo(ctx, StateIdle, "car offline and plug state unknown")
+		c.resetCounters()
+		c.updateSnapshot(power, chargeState, 0)
+		c.accumulateSample(power, chargeState, 0, ctx)
+		if c.OnUpdate != nil {
+			c.OnUpdate(c.GetStateSnapshot())
+		}
+		return
+	}
+
+	// Step 4: Skip auto-control in manual mode.
+	c.mu.RLock()
+	mode := c.mode
+	c.mu.RUnlock()
+	if mode == ModeManual {
+		c.updateSnapshot(power, chargeState, 0)
+		c.accumulateSample(power, chargeState, 0, ctx)
+		if c.OnUpdate != nil {
+			c.OnUpdate(c.GetStateSnapshot())
+		}
+		return
+	}
+
+	// Step 5: Calculate available amps.
+	availableAmps := c.calculateAvailableAmps(power.SurplusWatts, chargeState)
+
+	// Step 6: State machine decision.
+	if availableAmps >= c.cfg.MinChargeAmps {
+		c.mu.Lock()
+		c.consecutiveLow = 0
+		c.consecutiveSurplus++
+		surplus := c.consecutiveSurplus
+		c.mu.Unlock()
+
+		if !chargeState.IsOnline {
+			if surplus >= c.cfg.WakeThresholdPolls {
+				c.transitionTo(ctx, StateWakePending, "waking car")
+				if err := c.vehicle.WakeUp(ctx); err != nil {
+					c.logger.WarnContext(ctx, "wake failed", "error", err)
+					c.transitionTo(ctx, StateError, err.Error())
+				}
+			} else {
+				c.transitionTo(ctx, StateMonitoring, "surplus detected, waiting to wake")
+			}
+			c.updateSnapshot(power, chargeState, availableAmps)
+			c.accumulateSample(power, chargeState, availableAmps, ctx)
+			if c.OnUpdate != nil {
+				c.OnUpdate(c.GetStateSnapshot())
+			}
+			return
+		}
+
+		if chargeState.State != "Charging" {
+			if err := c.vehicle.SetChargingAmps(ctx, availableAmps); err != nil {
+				c.logger.WarnContext(ctx, "set amps before start failed", "error", err)
+				c.transitionTo(ctx, StateError, err.Error())
+			} else if err := c.vehicle.StartCharging(ctx); err != nil {
+				c.logger.WarnContext(ctx, "start charging failed", "error", err)
+			} else {
+				c.transitionTo(ctx, StateCharging, fmt.Sprintf("started at %dA", availableAmps))
+				c.mu.Lock()
+				c.lastChargeAmps = availableAmps
+				c.mu.Unlock()
+			}
+		} else {
+			c.mu.RLock()
+			lastAmps := c.lastChargeAmps
+			c.mu.RUnlock()
+			if availableAmps != lastAmps {
+				if err := c.vehicle.SetChargingAmps(ctx, availableAmps); err != nil {
+					c.logger.WarnContext(ctx, "set amps failed", "error", err)
+				} else {
+					c.mu.Lock()
+					c.lastChargeAmps = availableAmps
+					c.mu.Unlock()
+					c.logger.InfoContext(ctx, "adjusted amps", "amps", availableAmps)
+				}
+			}
+			c.transitionTo(ctx, StateCharging, fmt.Sprintf("charging at %dA", availableAmps))
+		}
+	} else {
+		c.mu.Lock()
+		c.consecutiveSurplus = 0
+		c.consecutiveLow++
+		lowCount := c.consecutiveLow
+		c.mu.Unlock()
+
+		if chargeState.State == "Charging" && lowCount >= c.cfg.DeadbandPolls {
+			if err := c.vehicle.StopCharging(ctx); err != nil {
+				c.logger.WarnContext(ctx, "stop charging failed", "error", err)
+			} else {
+				c.transitionTo(ctx, StateStoppedLowSurplus, "insufficient surplus")
+				c.mu.Lock()
+				c.lastChargeAmps = 0
+				c.mu.Unlock()
+			}
+		} else if chargeState.State == "Charging" {
+			c.transitionTo(ctx, StateCharging, fmt.Sprintf("low surplus tick %d/%d", lowCount, c.cfg.DeadbandPolls))
+		} else {
+			c.transitionTo(ctx, StateMonitoring, "waiting for surplus")
+		}
+	}
+
+	// Step 7: Update snapshot + accumulate.
+	c.updateSnapshot(power, chargeState, availableAmps)
+	c.accumulateSample(power, chargeState, availableAmps, ctx)
+
+	// Step 8: Notify SSE subscribers.
+	if c.OnUpdate != nil {
+		c.OnUpdate(c.GetStateSnapshot())
+	}
+}
+
+func (c *Controller) calculateAvailableAmps(surplusWatts float64, cs tesla.ChargeState) int {
+	surplusAmps := int(math.Floor(surplusWatts / float64(c.cfg.LineVoltage)))
+	if cs.State == "Charging" {
+		surplusAmps += cs.AmpsActual
+	}
+	if surplusAmps < 0 {
+		surplusAmps = 0
+	}
+	if surplusAmps > c.cfg.MaxChargeAmps {
+		surplusAmps = c.cfg.MaxChargeAmps
+	}
+	return surplusAmps
+}
+
+func (c *Controller) transitionTo(ctx context.Context, newState State, reason string) {
+	c.mu.Lock()
+	oldState := c.state
+	if oldState == newState {
+		c.mu.Unlock()
+		return
+	}
+	c.state = newState
+	snap := c.snapshot
+	c.mu.Unlock()
+
+	c.logger.InfoContext(ctx, "state transition", "from", oldState, "to", newState, "reason", reason)
+	if c.metrics != nil {
+		c.metrics.StateChanges.Add(ctx, 1,
+			metric.WithAttributes(
+				attribute.String("from", string(oldState)),
+				attribute.String("to", string(newState))))
+	}
+
+	if c.store != nil {
+		_ = c.store.InsertEvent(ctx, storage.Event{
+			Timestamp: time.Now(),
+			Type:      "state_change",
+			Message:   fmt.Sprintf("%s -> %s", oldState, newState),
+			Details:   fmt.Sprintf(`{"reason":%q}`, reason),
+		})
+	}
+
+	if newState == StateCharging && oldState != StateCharging {
+		c.mu.Lock()
+		c.resetSessionStatsLocked()
+		c.mu.Unlock()
+		if c.store != nil {
+			id, err := c.store.StartSession(ctx, storage.ChargeSession{
+				StartTime:    time.Now(),
+				StartBattery: snap.BatteryPct,
+			})
+			if err != nil {
+				c.logger.WarnContext(ctx, "failed to start charge session", "error", err)
+			} else {
+				c.mu.Lock()
+				c.activeSessionID = id
+				c.mu.Unlock()
+			}
+		}
+	}
+
+	if oldState == StateCharging && newState != StateCharging {
+		energyKWh, peakAmps, avgAmps, sessionID := c.sessionSummary()
+		if sessionID != 0 && c.store != nil {
+			if err := c.store.EndSession(ctx, sessionID, time.Now(), snap.BatteryPct, energyKWh, peakAmps, avgAmps); err != nil {
+				c.logger.WarnContext(ctx, "failed to end charge session", "error", err)
+			}
+			c.mu.Lock()
+			c.activeSessionID = 0
+			c.resetSessionStatsLocked()
+			c.mu.Unlock()
+		}
+	}
+}
+
+func (c *Controller) updateKnownPlugState(cs tesla.ChargeState) {
+	if !cs.IsOnline {
+		return
+	}
+	c.mu.Lock()
+	c.lastKnownPluggedIn = cs.PluggedIn
+	c.mu.Unlock()
+}
+
+func (c *Controller) shouldAttemptWake() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastKnownPluggedIn
+}
+
+func (c *Controller) recordSessionSample(cs tesla.ChargeState) {
+	if cs.State != "Charging" || cs.AmpsActual <= 0 {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.activeSessionID == 0 {
+		return
+	}
+
+	if cs.AmpsActual > c.sessionPeakAmps {
+		c.sessionPeakAmps = cs.AmpsActual
+	}
+	c.sessionAmpTotal += int64(cs.AmpsActual)
+	c.sessionSamples++
+	c.sessionEnergy += float64(cs.AmpsActual) * float64(c.cfg.LineVoltage) * c.cfg.PollInterval.Hours() / 1000
+}
+
+func (c *Controller) sessionSummary() (float64, int, float64, int64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	avgAmps := 0.0
+	if c.sessionSamples > 0 {
+		avgAmps = float64(c.sessionAmpTotal) / float64(c.sessionSamples)
+	}
+
+	return c.sessionEnergy, c.sessionPeakAmps, avgAmps, c.activeSessionID
+}
+
+func (c *Controller) resetSessionStatsLocked() {
+	c.sessionEnergy = 0
+	c.sessionPeakAmps = 0
+	c.sessionAmpTotal = 0
+	c.sessionSamples = 0
+}
+
+func (c *Controller) resetCounters() {
+	c.mu.Lock()
+	c.consecutiveLow = 0
+	c.consecutiveSurplus = 0
+	c.mu.Unlock()
+}
+
+func (c *Controller) updateSnapshot(power inverter.PowerData, cs tesla.ChargeState, targetAmps int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.snapshot = StateSnapshot{
+		State:              c.state,
+		Mode:               c.mode,
+		PVWatts:            power.PVWatts,
+		GridWatts:          power.GridWatts,
+		LoadWatts:          power.LoadWatts,
+		SurplusWatts:       power.SurplusWatts,
+		TargetAmps:         targetAmps,
+		ActualAmps:         cs.AmpsActual,
+		BatteryPct:         cs.BatteryPct,
+		CarPluggedIn:       cs.PluggedIn,
+		CarOnline:          cs.IsOnline,
+		ChargingState:      cs.State,
+		ConsecutiveLow:     c.consecutiveLow,
+		ConsecutiveSurplus: c.consecutiveSurplus,
+		LastUpdate:         time.Now(),
+	}
+}
+
+func (c *Controller) accumulateSample(power inverter.PowerData, cs tesla.ChargeState, amps int, ctx context.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	thisMinute := time.Now().Truncate(time.Minute)
+	if c.currentMinute.IsZero() {
+		c.currentMinute = thisMinute
+	}
+
+	if thisMinute != c.currentMinute {
+		c.mu.Unlock()
+		c.flushMinuteAverage(ctx)
+		c.mu.Lock()
+		c.currentMinute = thisMinute
+		c.accumulator = c.accumulator[:0]
+	}
+
+	c.accumulator = append(c.accumulator, accSample{
+		pvWatts:      power.PVWatts,
+		gridWatts:    power.GridWatts,
+		loadWatts:    power.LoadWatts,
+		surplusWatts: power.SurplusWatts,
+		chargeAmps:   amps,
+		batteryPct:   cs.BatteryPct,
+		state:        c.state,
+	})
+}
+
+func (c *Controller) flushMinuteAverage(ctx context.Context) {
+	c.mu.RLock()
+	acc := make([]accSample, len(c.accumulator))
+	copy(acc, c.accumulator)
+	minute := c.currentMinute
+	c.mu.RUnlock()
+
+	if c.store == nil || len(acc) == 0 {
+		return
+	}
+
+	n := float64(len(acc))
+	var sumPV, sumGrid, sumLoad, sumSurplus float64
+	for _, s := range acc {
+		sumPV += s.pvWatts
+		sumGrid += s.gridWatts
+		sumLoad += s.loadWatts
+		sumSurplus += s.surplusWatts
+	}
+
+	last := acc[len(acc)-1]
+	reading := storage.Reading{
+		Timestamp:    minute,
+		PVWatts:      sumPV / n,
+		GridWatts:    sumGrid / n,
+		LoadWatts:    sumLoad / n,
+		SurplusWatts: sumSurplus / n,
+		ChargeAmps:   last.chargeAmps,
+		BatteryPct:   last.batteryPct,
+		State:        string(last.state),
+	}
+
+	if err := c.store.InsertReading(ctx, reading); err != nil {
+		c.logger.ErrorContext(ctx, "failed to persist reading", "error", err)
+	}
+}
+
+// SetMode changes the operating mode.
+func (c *Controller) SetMode(mode Mode) {
+	c.mu.Lock()
+	c.mode = mode
+	c.mu.Unlock()
+}
+
+// ManualSetAmps sets charging amps (manual mode only).
+func (c *Controller) ManualSetAmps(ctx context.Context, amps int) error {
+	c.mu.RLock()
+	mode := c.mode
+	c.mu.RUnlock()
+	if mode != ModeManual {
+		return fmt.Errorf("controller: manual set amps requires manual mode")
+	}
+	return c.vehicle.SetChargingAmps(ctx, amps)
+}
+
+// ManualStart starts charging (manual mode only).
+func (c *Controller) ManualStart(ctx context.Context) error {
+	c.mu.RLock()
+	mode := c.mode
+	c.mu.RUnlock()
+	if mode != ModeManual {
+		return fmt.Errorf("controller: manual start requires manual mode")
+	}
+	return c.vehicle.StartCharging(ctx)
+}
+
+// ManualStop stops charging (manual mode only).
+func (c *Controller) ManualStop(ctx context.Context) error {
+	c.mu.RLock()
+	mode := c.mode
+	c.mu.RUnlock()
+	if mode != ModeManual {
+		return fmt.Errorf("controller: manual stop requires manual mode")
+	}
+	return c.vehicle.StopCharging(ctx)
+}
+
+// GetStateSnapshot returns a thread-safe copy of the current state.
+func (c *Controller) GetStateSnapshot() StateSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.snapshot
+}
