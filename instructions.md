@@ -53,6 +53,8 @@ Calls the Tesla Fleet API `vehicle_data` endpoint to get:
 - Battery percentage
 - Whether the car is online and plugged in
 
+When `TESLA_TEST_MODE=true`, the controller skips Tesla connectivity entirely and uses inverter surplus only. The dashboard remains live, `targetAmps` becomes a projected value, and all Tesla command actions are disabled.
+
 ### 3. Calculate available amps
 
 ```
@@ -192,13 +194,12 @@ Data is persisted in the `solar-data` Docker volume.
 ```bash
 # Set environment variables (see .env.example)
 export SUNGROW_HOST=192.168.1.100
-export TESLA_CLIENT_ID=...
-export TESLA_CLIENT_SECRET=...
-export TESLA_REFRESH_TOKEN=...
-export TESLA_VIN=...
+export TESLA_TEST_MODE=true
 
 go run ./cmd/server
 ```
+
+With `TESLA_TEST_MODE=true`, the Tesla OAuth and VIN variables are optional.
 
 ---
 
@@ -213,6 +214,7 @@ All configuration is via environment variables:
 | `TESLA_CLIENT_SECRET` | Yes | — | Tesla OAuth2 client secret |
 | `TESLA_REFRESH_TOKEN` | Yes | — | Tesla OAuth2 refresh token |
 | `TESLA_VIN` | Yes | — | Vehicle identification number |
+| `TESLA_TEST_MODE` | No | `false` | Skip Tesla connectivity and publish projected charging values only |
 | `SUNGROW_PORT` | No | `8082` | WiNet-S WebSocket port |
 | `TESLA_PRIVATE_KEY_PATH` | No | `/secrets/fleet-key.pem` | Path to EC private key for command signing |
 | `TESLA_REGION` | No | `na` | Fleet API region: `na`, `eu`, `cn` |

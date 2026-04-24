@@ -163,9 +163,15 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	}
 
 	// 7. Create Tesla client.
-	vehicle, err := deps.newVehicle(cfg, logger, metrics)
-	if err != nil {
-		return fmt.Errorf("failed to create tesla client: %w", err)
+	var vehicle tesla.VehicleController
+	if cfg.TeslaTestMode {
+		logger.Info("tesla test mode enabled", "message", "vehicle commands disabled; publishing projected surplus only")
+		vehicle = tesla.NewTestModeController()
+	} else {
+		vehicle, err = deps.newVehicle(cfg, logger, metrics)
+		if err != nil {
+			return fmt.Errorf("failed to create tesla client: %w", err)
+		}
 	}
 
 	// 8. Create controller.

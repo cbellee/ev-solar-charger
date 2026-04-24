@@ -11,6 +11,66 @@
     <div class="container mx-auto px-4 py-6 max-w-6xl">
         <h1 class="text-2xl font-bold mb-6">Solar EV Charger Controller</h1>
 
+        <div id="testModeBanner" class="hidden bg-amber-950/60 border border-amber-700 text-amber-100 rounded-lg p-4 mb-6">
+            Tesla test mode is enabled. Vehicle commands are disabled and the dashboard shows projected charging amps from inverter surplus only.
+        </div>
+
+        <!-- Power Flow Diagram -->
+        <div class="bg-gray-800 rounded-lg p-6 mb-6">
+            <svg id="powerFlowSvg" viewBox="0 0 620 435" class="w-full max-w-2xl mx-auto" style="min-height:360px">
+                <defs>
+                    <filter id="glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                    <!-- Animated energy dots — paths must exactly match the visible <path> d attributes -->
+                    <circle id="dotSH" r="5" fill="#facc15" filter="url(#glow)">
+                        <animateMotion dur="1.6s" repeatCount="indefinite" path="M310,124 Q310,160 240,190 L155,230"/>
+                    </circle>
+                    <circle id="dotSG" r="5" fill="#4ade80" filter="url(#glow)">
+                        <animateMotion dur="1.6s" repeatCount="indefinite" path="M310,124 Q310,160 390,190 L475,230"/>
+                    </circle>
+                    <circle id="dotGH" r="5" fill="#f87171" filter="url(#glow)">
+                        <animateMotion dur="1.8s" repeatCount="indefinite" path="M500,245 Q400,252 310,272 Q220,292 150,288"/>
+                    </circle>
+                    <circle id="dotHE" r="5" fill="#60a5fa" filter="url(#glow)">
+                        <animateMotion dur="1.2s" repeatCount="indefinite" path="M150,300 Q230,330 310,345"/>
+                    </circle>
+                </defs>
+
+                <!-- ===== SOLAR PANEL (top-center) ===== -->
+                <image href="/images/solar_panels.png" x="265" y="2" width="90" height="90"/>
+                <text x="310" y="106" text-anchor="middle" fill="#facc15" font-size="15" font-weight="bold" font-family="monospace" id="flowPvLabel">-- kW</text>
+                <text x="310" y="120" text-anchor="middle" fill="#94a3b8" font-size="11" font-family="sans-serif">Solar</text>
+
+                <!-- ===== FLOW PATHS ===== -->
+                <path id="pathSH" d="M310,124 Q310,160 240,190 L155,230" fill="none" stroke="#facc15" stroke-width="2.5" stroke-dasharray="6,4" opacity="0.35"/>
+                <path id="pathSG" d="M310,124 Q310,160 390,190 L475,230" fill="none" stroke="#4ade80" stroke-width="2.5" stroke-dasharray="6,4" opacity="0.35"/>
+                <path id="pathGH" d="M500,245 Q400,252 310,272 Q220,292 150,288" fill="none" stroke="#f87171" stroke-width="2.5" stroke-dasharray="6,4" opacity="0.35"/>
+                <path id="pathHE" d="M150,300 Q230,330 310,345" fill="none" stroke="#60a5fa" stroke-width="2.5" stroke-dasharray="6,4" opacity="0.35"/>
+
+                <!-- Animated dots -->
+                <use href="#dotSH" id="useDotSH"/>
+                <use href="#dotSG" id="useDotSG"/>
+                <use href="#dotGH" id="useDotGH"/>
+                <use href="#dotHE" id="useDotHE"/>
+
+                <!-- ===== HOUSE (bottom-left) ===== -->
+                <image href="/images/house.png" x="100" y="200" width="100" height="100"/>
+                <text x="150" y="310" text-anchor="middle" fill="#a78bfa" font-size="15" font-weight="bold" font-family="monospace" id="flowLoadLabel">-- kW</text>
+                <text x="150" y="324" text-anchor="middle" fill="#94a3b8" font-size="11" font-family="sans-serif">Home</text>
+
+                <!-- ===== GRID PYLON (right) ===== -->
+                <image href="/images/electricity_pylon.png" x="440" y="190" width="100" height="100"/>
+                <text x="490" y="300" text-anchor="middle" font-size="15" font-weight="bold" font-family="monospace" id="flowGridLabel">-- kW</text>
+                <text x="490" y="314" text-anchor="middle" fill="#94a3b8" font-size="11" font-family="sans-serif" id="flowGridDirection">Grid</text>
+
+                <!-- ===== EV CAR (below house) ===== -->
+                <image href="/images/tesla_ev.png" x="265" y="330" width="90" height="90"/>
+                <text x="310" y="430" text-anchor="middle" fill="#60a5fa" font-size="12" font-weight="bold" font-family="monospace" id="flowEvLabel">--</text>
+
+                <!-- Surplus label -->
+                <text x="310" y="290" text-anchor="middle" fill="#4ade80" font-size="14" font-weight="bold" font-family="monospace" id="flowSurplusLabel">Surplus: --</text>
+            </svg>
+        </div>
+
         <!-- Real-time Panel -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
             <!-- Solar Data -->
@@ -49,7 +109,7 @@
                         <span id="chargingState" class="font-mono">--</span>
                     </div>
                     <div class="flex justify-between">
-                        <span>Target / Actual Amps</span>
+                        <span id="ampsLabel">Target / Actual Amps</span>
                         <span><span id="targetAmps" class="font-mono">--</span> / <span id="actualAmps" class="font-mono">--</span> A</span>
                     </div>
                     <div class="flex justify-between">
@@ -79,10 +139,10 @@
                     <button onclick="setMode('manual')" class="px-3 py-1 bg-yellow-700 hover:bg-yellow-600 rounded text-sm">Manual</button>
                 </div>
                 <div class="border-l border-gray-600 pl-3 flex items-center gap-2">
-                    <button onclick="controlAction('start')" class="px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-sm">Start</button>
-                    <button onclick="controlAction('stop')" class="px-3 py-1 bg-red-700 hover:bg-red-600 rounded text-sm">Stop</button>
-                    <input type="number" id="ampsInput" min="5" max="32" value="10" class="w-16 px-2 py-1 bg-gray-700 rounded text-sm">
-                    <button onclick="setAmps()" class="px-3 py-1 bg-purple-700 hover:bg-purple-600 rounded text-sm">Set Amps</button>
+                    <button onclick="controlAction('start')" class="vehicle-control px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-sm">Start</button>
+                    <button onclick="controlAction('stop')" class="vehicle-control px-3 py-1 bg-red-700 hover:bg-red-600 rounded text-sm">Stop</button>
+                    <input type="number" id="ampsInput" min="5" max="32" value="10" class="vehicle-control w-16 px-2 py-1 bg-gray-700 rounded text-sm">
+                    <button onclick="setAmps()" class="vehicle-control px-3 py-1 bg-purple-700 hover:bg-purple-600 rounded text-sm">Set Amps</button>
                 </div>
             </div>
             <div id="controlStatus" class="mt-2 text-sm text-gray-400"></div>
@@ -187,6 +247,25 @@
         let histOffset = 0;
         const histLimit = 100;
 
+        function formatPower(watts) {
+            const abs = Math.abs(watts);
+            if (abs >= 1000) {
+                return (watts / 1000).toFixed(2) + ' kW';
+            }
+            return Math.round(watts) + ' W';
+        }
+
+        function setVehicleControlsDisabled(disabled) {
+            document.getElementById('testModeBanner').classList.toggle('hidden', !disabled);
+            document.getElementById('ampsLabel').textContent = disabled ? 'Projected / Actual Amps' : 'Target / Actual Amps';
+
+            document.querySelectorAll('.vehicle-control').forEach((el) => {
+                el.disabled = disabled;
+                el.classList.toggle('opacity-50', disabled);
+                el.classList.toggle('cursor-not-allowed', disabled);
+            });
+        }
+
         // SSE connection.
         const evtSource = new EventSource('/events');
         evtSource.onmessage = function(event) {
@@ -199,19 +278,20 @@
         };
 
         function updateDashboard(d) {
-            document.getElementById('pvWatts').textContent = Math.round(d.pvWatts) + ' W';
-            document.getElementById('gridWatts').textContent = Math.round(d.gridWatts) + ' W';
+            setVehicleControlsDisabled(Boolean(d.testMode));
+            document.getElementById('pvWatts').textContent = formatPower(d.pvWatts);
+            document.getElementById('gridWatts').textContent = formatPower(d.gridWatts);
             const gridEl = document.getElementById('gridWatts');
             gridEl.className = d.gridWatts < 0 ? 'font-mono text-green-400' : 'font-mono text-red-400';
-            document.getElementById('loadWatts').textContent = Math.round(d.loadWatts) + ' W';
-            document.getElementById('surplusWatts').textContent = Math.round(d.surplusWatts) + ' W';
+            document.getElementById('loadWatts').textContent = formatPower(d.loadWatts);
+            document.getElementById('surplusWatts').textContent = formatPower(d.surplusWatts);
             document.getElementById('state').textContent = d.state;
-            document.getElementById('chargingState').textContent = d.chargingState || '--';
+            document.getElementById('chargingState').textContent = d.testMode ? 'Projected only' : (d.chargingState || '--');
             document.getElementById('targetAmps').textContent = d.targetAmps;
-            document.getElementById('actualAmps').textContent = d.actualAmps;
-            document.getElementById('batteryPct').textContent = d.batteryPct.toFixed(1) + ' %';
-            document.getElementById('carOnline').textContent = d.carOnline ? 'Yes' : 'No';
-            document.getElementById('carPluggedIn').textContent = d.carPluggedIn ? 'Yes' : 'No';
+            document.getElementById('actualAmps').textContent = d.testMode ? '--' : d.actualAmps;
+            document.getElementById('batteryPct').textContent = d.testMode ? '--' : d.batteryPct.toFixed(1) + ' %';
+            document.getElementById('carOnline').textContent = d.testMode ? 'N/A' : (d.carOnline ? 'Yes' : 'No');
+            document.getElementById('carPluggedIn').textContent = d.testMode ? 'N/A' : (d.carPluggedIn ? 'Yes' : 'No');
             document.getElementById('currentMode').textContent = d.mode;
             document.getElementById('lastUpdate').textContent = new Date(d.lastUpdate).toLocaleTimeString();
 
@@ -223,10 +303,58 @@
                 'wake_pending': 'text-blue-400', 'error': 'text-red-400'
             };
             stateEl.className = 'font-mono ' + (colors[d.state] || '');
+
+            // Update power flow diagram.
+            updatePowerFlow(d);
         }
 
         // Initial state fetch.
         fetch('/api/state').then(r => r.json()).then(updateDashboard).catch(() => {});
+
+        function updatePowerFlow(d) {
+            const pv = d.pvWatts || 0;
+            const grid = d.gridWatts || 0;  // positive = importing, negative = exporting
+            const load = d.loadWatts || 0;
+            const surplus = d.surplusWatts || 0;
+            const charging = d.state === 'charging';
+
+            // Labels.
+            document.getElementById('flowPvLabel').textContent = formatPower(pv);
+            document.getElementById('flowLoadLabel').textContent = formatPower(load);
+            document.getElementById('flowSurplusLabel').textContent = 'Surplus: ' + formatPower(surplus);
+
+            const gridLabel = document.getElementById('flowGridLabel');
+            gridLabel.textContent = formatPower(Math.abs(grid));
+            gridLabel.setAttribute('fill', grid < 0 ? '#4ade80' : grid > 0 ? '#f87171' : '#9ca3af');
+
+            const gridDir = document.getElementById('flowGridDirection');
+            gridDir.textContent = grid < 0 ? 'Exporting' : grid > 0 ? 'Importing' : 'Grid';
+
+            const evLabel = document.getElementById('flowEvLabel');
+            evLabel.textContent = charging ? d.targetAmps + ' A' : (surplus > 0 ? formatPower(surplus) : 'Idle');
+
+            // Show/hide flow dots and paths based on actual power flow.
+            const hasPv = pv > 50;
+            const isExporting = grid < -50;
+            const isImporting = grid > 50;
+            const hasLoad = load > 50;
+
+            // Solar → House (whenever PV is generating).
+            setFlowVisible('useDotSH', 'pathSH', hasPv);
+            // Solar → Grid (exporting surplus).
+            setFlowVisible('useDotSG', 'pathSG', hasPv && isExporting);
+            // Grid → House (importing).
+            setFlowVisible('useDotGH', 'pathGH', isImporting);
+            // House → EV (charging or surplus available).
+            setFlowVisible('useDotHE', 'pathHE', charging || surplus > 50);
+        }
+
+        function setFlowVisible(dotId, pathId, visible) {
+            const dot = document.getElementById(dotId);
+            const path = document.getElementById(pathId);
+            if (dot) dot.style.display = visible ? '' : 'none';
+            if (path) path.style.opacity = visible ? '1' : '0.2';
+        }
 
         async function setMode(mode) {
             const res = await fetch('/api/mode', {
@@ -276,10 +404,10 @@
             tbody.innerHTML = readings.map(r => `
                 <tr class="border-b border-gray-800 hover:bg-gray-750">
                     <td class="py-1 px-2">${new Date(r.Timestamp).toLocaleString()}</td>
-                    <td class="py-1 px-2">${Math.round(r.PVWatts)}</td>
-                    <td class="py-1 px-2">${Math.round(r.GridWatts)}</td>
-                    <td class="py-1 px-2">${Math.round(r.LoadWatts)}</td>
-                    <td class="py-1 px-2">${Math.round(r.SurplusWatts)}</td>
+                    <td class="py-1 px-2">${formatPower(r.PVWatts)}</td>
+                    <td class="py-1 px-2">${formatPower(r.GridWatts)}</td>
+                    <td class="py-1 px-2">${formatPower(r.LoadWatts)}</td>
+                    <td class="py-1 px-2">${formatPower(r.SurplusWatts)}</td>
                     <td class="py-1 px-2">${r.ChargeAmps}</td>
                     <td class="py-1 px-2">${r.BatteryPct.toFixed(1)}%</td>
                     <td class="py-1 px-2">${r.State}</td>

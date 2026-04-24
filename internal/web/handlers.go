@@ -15,6 +15,9 @@ import (
 //go:embed templates/index.html
 var templateFS embed.FS
 
+//go:embed images
+var imageFS embed.FS
+
 var indexTemplate = template.Must(template.ParseFS(templateFS, "templates/index.html"))
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {

@@ -2,10 +2,14 @@ services:
   solar-ev-charger:
     build: .
     ports:
-      - "127.0.0.1:8080:8080"
+      - "8080:8080"
     env_file: .env
     environment:
       HTTP_HOST: 0.0.0.0
+      LOG_LEVEL: info
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
     volumes:
       - ./secrets:/secrets:ro
       - solar-data:/data

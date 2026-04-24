@@ -116,6 +116,18 @@ func Test_Load_defaultsApplied(t *testing.T) {
 	if cfg.TeslaRegion != "na" {
 		t.Errorf("TeslaRegion = %q, want %q", cfg.TeslaRegion, "na")
 	}
+	if cfg.TeslaTestMode {
+		t.Fatal("TeslaTestMode = true, want false")
+	}
+	if cfg.TeslaChargingPollInterval != 60*time.Second {
+		t.Errorf("TeslaChargingPollInterval = %v, want 60s", cfg.TeslaChargingPollInterval)
+	}
+	if cfg.TeslaIdlePollInterval != 300*time.Second {
+		t.Errorf("TeslaIdlePollInterval = %v, want 300s", cfg.TeslaIdlePollInterval)
+	}
+	if cfg.AmpsChangeThreshold != 2 {
+		t.Errorf("AmpsChangeThreshold = %d, want 2", cfg.AmpsChangeThreshold)
+	}
 }
 
 func Test_Load_logLevelDebug(t *testing.T) {
@@ -182,5 +194,86 @@ func Test_Load_invalidHTTPPort(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for invalid HTTP_PORT")
+	}
+}
+
+func Test_Load_testModeSkipsTeslaCredentials(t *testing.T) {
+	t.Setenv("SUNGROW_HOST", "192.168.1.100")
+	t.Setenv("HTTP_AUTH_PASSWORD", "test-password")
+	t.Setenv("TESLA_TEST_MODE", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.TeslaTestMode {
+		t.Fatal("TeslaTestMode = false, want true")
+	}
+	if cfg.TeslaVIN != "" {
+		t.Fatalf("TeslaVIN = %q, want empty in test mode", cfg.TeslaVIN)
+	}
+}
+
+func Test_Load_invalidTeslaTestMode(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TESLA_TEST_MODE", "maybe")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid TESLA_TEST_MODE")
+	}
+}
+
+func Test_Load_teslaChargingPollSecondsCustom(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TESLA_CHARGING_POLL_SECONDS", "30")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TeslaChargingPollInterval != 30*time.Second {
+		t.Errorf("TeslaChargingPollInterval = %v, want 30s", cfg.TeslaChargingPollInterval)
+	}
+}
+
+func Test_Load_teslaChargingPollSecondsZero(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TESLA_CHARGING_POLL_SECONDS", "0")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for TESLA_CHARGING_POLL_SECONDS=0")
+	}
+}
+
+func Test_Load_teslaIdlePollSecondsCustom(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TESLA_IDLE_POLL_SECONDS", "120")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TeslaIdlePollInterval != 120*time.Second {
+		t.Errorf("TeslaIdlePollInterval = %v, want 120s", cfg.TeslaIdlePollInterval)
+	}
+}
+
+func Test_Load_ampsChangeThresholdCustom(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("AMPS_CHANGE_THRESHOLD", "5")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AmpsChangeThreshold != 5 {
+		t.Errorf("AmpsChangeThreshold = %d, want 5", cfg.AmpsChangeThreshold)
+	}
+}
+
+func Test_Load_ampsChangeThresholdNegative(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("AMPS_CHANGE_THRESHOLD", "-1")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for AMPS_CHANGE_THRESHOLD=-1")
 	}
 }

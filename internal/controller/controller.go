@@ -42,6 +42,7 @@ const (
 type StateSnapshot struct {
 	State              State     `json:"state"`
 	Mode               Mode      `json:"mode"`
+	TestMode           bool      `json:"testMode"`
 	PVWatts            float64   `json:"pvWatts"`
 	GridWatts          float64   `json:"gridWatts"`
 	LoadWatts          float64   `json:"loadWatts"`
@@ -84,6 +85,10 @@ type Controller struct {
 	sessionAmpTotal int64
 	sessionSamples  int
 
+	lastTeslaPoll     time.Time
+	cachedChargeState tesla.ChargeState
+	hasCachedState    bool
+
 	OnUpdate func(StateSnapshot)
 }
 
@@ -111,6 +116,11 @@ func New(inv inverter.InverterReader, veh tesla.VehicleController, store storage
 		metrics:  metrics,
 		state:    StateIdle,
 		mode:     ModeAuto,
+		snapshot: StateSnapshot{
+			State:    StateIdle,
+			Mode:     ModeAuto,
+			TestMode: cfg.TeslaTestMode,
+		},
 	}
 }
 
@@ -156,16 +166,28 @@ func (c *Controller) Tick(ctx context.Context) {
 		return
 	}
 
-	// Step 2: Read vehicle state.
-	chargeState, err := c.vehicle.GetChargeState(ctx)
-	if err != nil {
-		if err == tesla.ErrCarOffline {
-			chargeState = tesla.ChargeState{IsOnline: false}
-		} else {
-			c.logger.ErrorContext(ctx, "tesla read failed", "error", err)
-			c.transitionTo(ctx, StateError, err.Error())
-			return
+	if c.cfg.TeslaTestMode {
+		c.tickTestMode(ctx, power)
+		return
+	}
+
+	// Step 2: Read vehicle state (cost-aware polling).
+	// Tesla Fleet API charges $0.002 per vehicle_data call. We only poll when
+	// the controller state warrants it, using cached state for intermediate ticks.
+	chargeState := c.getCachedChargeState()
+	if c.shouldPollTesla(power.SurplusWatts) {
+		fresh, err := c.vehicle.GetChargeState(ctx)
+		if err != nil {
+			if err == tesla.ErrCarOffline {
+				fresh = tesla.ChargeState{IsOnline: false}
+			} else {
+				c.logger.ErrorContext(ctx, "tesla read failed", "error", err)
+				c.transitionTo(ctx, StateError, err.Error())
+				return
+			}
 		}
+		chargeState = fresh
+		c.setCachedChargeState(fresh)
 	}
 	c.updateKnownPlugState(chargeState)
 	c.recordSessionSample(chargeState)
@@ -250,7 +272,15 @@ func (c *Controller) Tick(ctx context.Context) {
 			c.mu.RLock()
 			lastAmps := c.lastChargeAmps
 			c.mu.RUnlock()
-			if availableAmps != lastAmps {
+			ampsDiff := availableAmps - lastAmps
+			if ampsDiff < 0 {
+				ampsDiff = -ampsDiff
+			}
+			threshold := c.cfg.AmpsChangeThreshold
+			if threshold < 1 {
+				threshold = 1
+			}
+			if ampsDiff >= threshold {
 				if err := c.vehicle.SetChargingAmps(ctx, availableAmps); err != nil {
 					c.logger.WarnContext(ctx, "set amps failed", "error", err)
 				} else {
@@ -290,6 +320,29 @@ func (c *Controller) Tick(ctx context.Context) {
 	c.accumulateSample(power, chargeState, availableAmps, ctx)
 
 	// Step 8: Notify SSE subscribers.
+	if c.OnUpdate != nil {
+		c.OnUpdate(c.GetStateSnapshot())
+	}
+}
+
+func (c *Controller) tickTestMode(ctx context.Context, power inverter.PowerData) {
+	availableAmps := c.calculateAvailableAmps(power.SurplusWatts, tesla.ChargeState{})
+	chargeState := tesla.ChargeState{State: "Projected only"}
+
+	if availableAmps >= c.cfg.MinChargeAmps {
+		c.mu.Lock()
+		c.consecutiveLow = 0
+		c.consecutiveSurplus++
+		c.mu.Unlock()
+		c.transitionTo(ctx, StateMonitoring, fmt.Sprintf("test mode projected %dA", availableAmps))
+	} else {
+		c.resetCounters()
+		c.transitionTo(ctx, StateIdle, "test mode waiting for surplus")
+	}
+
+	c.updateSnapshot(power, chargeState, availableAmps)
+	c.accumulateSample(power, chargeState, availableAmps, ctx)
+
 	if c.OnUpdate != nil {
 		c.OnUpdate(c.GetStateSnapshot())
 	}
@@ -385,6 +438,50 @@ func (c *Controller) shouldAttemptWake() bool {
 	return c.lastKnownPluggedIn
 }
 
+// shouldPollTesla decides whether to make a fresh Tesla API call this tick.
+// Tesla Fleet API charges per vehicle_data request ($0.002) and has rate limits
+// (60 req/min). We poll more frequently while charging (to track amps/battery)
+// and less frequently when idle, to balance cost against solar responsiveness.
+func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
+	c.mu.RLock()
+	state := c.state
+	lastPoll := c.lastTeslaPoll
+	hasCache := c.hasCachedState
+	c.mu.RUnlock()
+
+	if !hasCache {
+		return true
+	}
+
+	now := time.Now()
+	switch state {
+	case StateCharging:
+		return now.Sub(lastPoll) >= c.cfg.TeslaChargingPollInterval
+	case StateWakePending:
+		return false
+	default:
+		surplusAmps := int(math.Floor(surplusWatts / float64(c.cfg.LineVoltage)))
+		if surplusAmps >= c.cfg.MinChargeAmps {
+			return now.Sub(lastPoll) >= c.cfg.TeslaIdlePollInterval
+		}
+		return false
+	}
+}
+
+func (c *Controller) getCachedChargeState() tesla.ChargeState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cachedChargeState
+}
+
+func (c *Controller) setCachedChargeState(cs tesla.ChargeState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cachedChargeState = cs
+	c.hasCachedState = true
+	c.lastTeslaPoll = time.Now()
+}
+
 func (c *Controller) recordSessionSample(cs tesla.ChargeState) {
 	if cs.State != "Charging" || cs.AmpsActual <= 0 {
 		return
@@ -436,6 +533,7 @@ func (c *Controller) updateSnapshot(power inverter.PowerData, cs tesla.ChargeSta
 	c.snapshot = StateSnapshot{
 		State:              c.state,
 		Mode:               c.mode,
+		TestMode:           c.cfg.TeslaTestMode,
 		PVWatts:            power.PVWatts,
 		GridWatts:          power.GridWatts,
 		LoadWatts:          power.LoadWatts,
@@ -521,11 +619,15 @@ func (c *Controller) flushMinuteAverage(ctx context.Context) {
 func (c *Controller) SetMode(mode Mode) {
 	c.mu.Lock()
 	c.mode = mode
+	c.snapshot.Mode = mode
 	c.mu.Unlock()
 }
 
 // ManualSetAmps sets charging amps (manual mode only).
 func (c *Controller) ManualSetAmps(ctx context.Context, amps int) error {
+	if c.cfg.TeslaTestMode {
+		return tesla.ErrCommandsDisabled
+	}
 	c.mu.RLock()
 	mode := c.mode
 	c.mu.RUnlock()
@@ -537,6 +639,9 @@ func (c *Controller) ManualSetAmps(ctx context.Context, amps int) error {
 
 // ManualStart starts charging (manual mode only).
 func (c *Controller) ManualStart(ctx context.Context) error {
+	if c.cfg.TeslaTestMode {
+		return tesla.ErrCommandsDisabled
+	}
 	c.mu.RLock()
 	mode := c.mode
 	c.mu.RUnlock()
@@ -548,6 +653,9 @@ func (c *Controller) ManualStart(ctx context.Context) error {
 
 // ManualStop stops charging (manual mode only).
 func (c *Controller) ManualStop(ctx context.Context) error {
+	if c.cfg.TeslaTestMode {
+		return tesla.ErrCommandsDisabled
+	}
 	c.mu.RLock()
 	mode := c.mode
 	c.mu.RUnlock()

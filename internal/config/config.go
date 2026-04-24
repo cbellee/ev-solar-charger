@@ -11,27 +11,31 @@ import (
 
 // Config holds all application configuration loaded from environment variables.
 type Config struct {
-	SungrowHost         string
-	SungrowPort         int
-	TeslaClientID       string
-	TeslaClientSecret   string
-	TeslaRefreshToken   string
-	TeslaVIN            string
-	TeslaPrivateKeyPath string
-	TeslaRegion         string
-	PollInterval        time.Duration
-	MinChargeAmps       int
-	MaxChargeAmps       int
-	LineVoltage         int
-	DeadbandPolls       int
-	WakeThresholdPolls  int
-	HTTPHost            string
-	HTTPPort            int
-	HTTPAuthUser        string
-	HTTPAuthPassword    string
-	LogLevel            slog.Level
-	DBPath              string
-	DBRetentionDays     int
+	SungrowHost               string
+	SungrowPort               int
+	TeslaClientID             string
+	TeslaClientSecret         string
+	TeslaRefreshToken         string
+	TeslaVIN                  string
+	TeslaPrivateKeyPath       string
+	TeslaRegion               string
+	TeslaTestMode             bool
+	PollInterval              time.Duration
+	MinChargeAmps             int
+	MaxChargeAmps             int
+	LineVoltage               int
+	DeadbandPolls             int
+	WakeThresholdPolls        int
+	TeslaChargingPollInterval time.Duration
+	TeslaIdlePollInterval     time.Duration
+	AmpsChangeThreshold       int
+	HTTPHost                  string
+	HTTPPort                  int
+	HTTPAuthUser              string
+	HTTPAuthPassword          string
+	LogLevel                  slog.Level
+	DBPath                    string
+	DBRetentionDays           int
 }
 
 // Load reads configuration from environment variables, applies defaults,
@@ -54,28 +58,34 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	cfg.TeslaClientID, err = requireEnv("TESLA_CLIENT_ID")
+	cfg.TeslaTestMode, err = envBool("TESLA_TEST_MODE", false)
 	if err != nil {
 		return Config{}, err
 	}
-
-	cfg.TeslaClientSecret, err = requireEnv("TESLA_CLIENT_SECRET")
-	if err != nil {
-		return Config{}, err
-	}
-
-	cfg.TeslaRefreshToken, err = requireEnv("TESLA_REFRESH_TOKEN")
-	if err != nil {
-		return Config{}, err
-	}
-
-	cfg.TeslaVIN, err = requireEnv("TESLA_VIN")
-	if err != nil {
-		return Config{}, err
-	}
-
 	cfg.TeslaPrivateKeyPath = envOrDefault("TESLA_PRIVATE_KEY_PATH", "/secrets/fleet-key.pem")
 	cfg.TeslaRegion = envOrDefault("TESLA_REGION", "na")
+
+	if !cfg.TeslaTestMode {
+		cfg.TeslaClientID, err = requireEnv("TESLA_CLIENT_ID")
+		if err != nil {
+			return Config{}, err
+		}
+
+		cfg.TeslaClientSecret, err = requireEnv("TESLA_CLIENT_SECRET")
+		if err != nil {
+			return Config{}, err
+		}
+
+		cfg.TeslaRefreshToken, err = requireEnv("TESLA_REFRESH_TOKEN")
+		if err != nil {
+			return Config{}, err
+		}
+
+		cfg.TeslaVIN, err = requireEnv("TESLA_VIN")
+		if err != nil {
+			return Config{}, err
+		}
+	}
 
 	pollSec, err := envInt("POLL_INTERVAL_SECONDS", 10)
 	if err != nil {
@@ -126,6 +136,32 @@ func Load() (Config, error) {
 	}
 	if cfg.WakeThresholdPolls < 1 {
 		return Config{}, fmt.Errorf("config: WAKE_THRESHOLD_POLLS must be >= 1, got %d", cfg.WakeThresholdPolls)
+	}
+
+	teslaChargingSec, err := envInt("TESLA_CHARGING_POLL_SECONDS", 60)
+	if err != nil {
+		return Config{}, err
+	}
+	if teslaChargingSec < 1 {
+		return Config{}, fmt.Errorf("config: TESLA_CHARGING_POLL_SECONDS must be >= 1, got %d", teslaChargingSec)
+	}
+	cfg.TeslaChargingPollInterval = time.Duration(teslaChargingSec) * time.Second
+
+	teslaIdleSec, err := envInt("TESLA_IDLE_POLL_SECONDS", 300)
+	if err != nil {
+		return Config{}, err
+	}
+	if teslaIdleSec < 1 {
+		return Config{}, fmt.Errorf("config: TESLA_IDLE_POLL_SECONDS must be >= 1, got %d", teslaIdleSec)
+	}
+	cfg.TeslaIdlePollInterval = time.Duration(teslaIdleSec) * time.Second
+
+	cfg.AmpsChangeThreshold, err = envInt("AMPS_CHANGE_THRESHOLD", 2)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.AmpsChangeThreshold < 0 {
+		return Config{}, fmt.Errorf("config: AMPS_CHANGE_THRESHOLD must be >= 0, got %d", cfg.AmpsChangeThreshold)
 	}
 
 	cfg.HTTPHost = envOrDefault("HTTP_HOST", "127.0.0.1")
@@ -190,6 +226,18 @@ func envInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("config: %s must be an integer: %w", key, err)
 	}
 	return n, nil
+}
+
+func envBool(key string, fallback bool) (bool, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("config: %s must be a boolean: %w", key, err)
+	}
+	return b, nil
 }
 
 func validatePort(name string, port int) error {

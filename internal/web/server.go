@@ -21,6 +21,7 @@ func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logge
 	privateMux := http.NewServeMux()
 
 	privateMux.HandleFunc("GET /", handleIndex)
+	privateMux.Handle("GET /images/", http.FileServer(http.FS(imageFS)))
 	privateMux.HandleFunc("GET /api/state", handleState(ctrl))
 	privateMux.Handle("GET /events", hub)
 	privateMux.HandleFunc("POST /api/control", handleControl(ctrl))

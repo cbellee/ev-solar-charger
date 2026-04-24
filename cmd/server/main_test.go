@@ -291,3 +291,24 @@ func Test_runWithContext_loadConfigError(t *testing.T) {
 		t.Fatalf("error = %v, want load config context", err)
 	}
 }
+
+func Test_runWithContext_testModeSkipsTeslaClientCreation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cfg := testConfig(0)
+	cfg.TeslaTestMode = true
+	deps := testDeps(cfg)
+	called := false
+	deps.newVehicle = func(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) (tesla.VehicleController, error) {
+		called = true
+		return nil, errors.New("should not be called")
+	}
+
+	if err := runWithContext(ctx, deps); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Fatal("expected Tesla client creation to be skipped in test mode")
+	}
+}
