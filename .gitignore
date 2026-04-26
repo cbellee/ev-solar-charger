@@ -1,0 +1,29 @@
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local data and runtime artifacts
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+autocert/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Build / tooling
+bin/
+dist/
+coverage.out
+*.out

@@ -151,6 +151,7 @@ func Test_handleControl_start(t *testing.T) {
 
 	body := strings.NewReader(`{"action":"start"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -166,6 +167,7 @@ func Test_handleControl_stop(t *testing.T) {
 
 	body := strings.NewReader(`{"action":"stop"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -181,6 +183,7 @@ func Test_handleControl_setAmps(t *testing.T) {
 
 	body := strings.NewReader(`{"action":"setAmps","amps":16}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -195,6 +198,7 @@ func Test_handleControl_invalidAction(t *testing.T) {
 
 	body := strings.NewReader(`{"action":"reboot"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -209,6 +213,7 @@ func Test_handleControl_badJSON(t *testing.T) {
 
 	body := strings.NewReader(`not json`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -224,6 +229,7 @@ func Test_handleControl_missingAmps(t *testing.T) {
 
 	body := strings.NewReader(`{"action":"setAmps"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -238,6 +244,7 @@ func Test_handleControl_requiresManualMode(t *testing.T) {
 
 	body := strings.NewReader(`{"action":"start"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -252,6 +259,7 @@ func Test_handleMode_auto(t *testing.T) {
 
 	body := strings.NewReader(`{"mode":"auto"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/mode", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -266,6 +274,7 @@ func Test_handleMode_manual(t *testing.T) {
 
 	body := strings.NewReader(`{"mode":"manual"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/mode", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
@@ -280,6 +289,7 @@ func Test_handleMode_invalid(t *testing.T) {
 
 	body := strings.NewReader(`{"mode":"turbo"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/mode", body)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 

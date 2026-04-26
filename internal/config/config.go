@@ -242,7 +242,10 @@ func Load() (Config, error) {
 		}
 	}
 
-	cfg.HTTPAuthUser = envOrDefault("HTTP_AUTH_USER", "admin")
+	cfg.HTTPAuthUser, err = requireEnv("HTTP_AUTH_USER")
+	if err != nil {
+		return Config{}, err
+	}
 	cfg.HTTPAuthPassword, err = requireEnv("HTTP_AUTH_PASSWORD")
 	if err != nil {
 		return Config{}, err

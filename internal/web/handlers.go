@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cbellee/solar-ev-charger/internal/controller"
@@ -35,6 +36,31 @@ func handleState(ctrl *controller.Controller) http.HandlerFunc {
 	}
 }
 
+// maxJSONBodyBytes caps inbound JSON request bodies to mitigate memory exhaustion.
+const maxJSONBodyBytes = 4 * 1024
+
+// requireJSON enforces Content-Type: application/json and limits body size.
+// This blocks simple cross-site form-based CSRF (which cannot set custom JSON
+// content type without preflighted CORS) and bounds memory usage.
+func requireJSON(w http.ResponseWriter, r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if i := strings.Index(ct, ";"); i >= 0 {
+		ct = ct[:i]
+	}
+	if !strings.EqualFold(strings.TrimSpace(ct), "application/json") {
+		http.Error(w, `{"error":"content-type must be application/json"}`, http.StatusUnsupportedMediaType)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	return true
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
 type controlRequest struct {
 	Action string `json:"action"`
 	Amps   int    `json:"amps"`
@@ -42,9 +68,12 @@ type controlRequest struct {
 
 func handleControl(ctrl *controller.Controller) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireJSON(w, r) {
+			return
+		}
 		var req controlRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 
@@ -56,17 +85,17 @@ func handleControl(ctrl *controller.Controller) http.HandlerFunc {
 			err = ctrl.ManualStop(r.Context())
 		case "setAmps":
 			if req.Amps == 0 {
-				http.Error(w, `{"error":"amps is required for setAmps action"}`, http.StatusBadRequest)
+				writeJSONError(w, http.StatusBadRequest, "amps is required for setAmps action")
 				return
 			}
 			err = ctrl.ManualSetAmps(r.Context(), req.Amps)
 		default:
-			http.Error(w, `{"error":"invalid action"}`, http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid action")
 			return
 		}
 
 		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "control action failed")
 			return
 		}
 
@@ -81,9 +110,12 @@ type modeRequest struct {
 
 func handleMode(ctrl *controller.Controller) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireJSON(w, r) {
+			return
+		}
 		var req modeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 
@@ -93,7 +125,7 @@ func handleMode(ctrl *controller.Controller) http.HandlerFunc {
 		case "manual":
 			ctrl.SetMode(controller.ModeManual)
 		default:
-			http.Error(w, `{"error":"invalid mode, must be auto or manual"}`, http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid mode, must be auto or manual")
 			return
 		}
 

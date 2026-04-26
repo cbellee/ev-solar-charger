@@ -119,10 +119,8 @@ func (s *oauthServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request
 	query := r.URL.Query()
 	if oauthErr := strings.TrimSpace(query.Get("error")); oauthErr != "" {
 		description := strings.TrimSpace(query.Get("error_description"))
-		if description != "" {
-			oauthErr = oauthErr + ": " + description
-		}
-		renderOAuthHTML(w, http.StatusBadRequest, "Tesla authorization failed", oauthErr)
+		s.logger.Warn("oauth: provider returned error", "error", oauthErr, "description", description)
+		renderOAuthHTML(w, http.StatusBadRequest, "Tesla authorization failed", "Tesla returned an authorization error. See server logs for details.")
 		return
 	}
 
@@ -142,7 +140,7 @@ func (s *oauthServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request
 	tokens, err := s.exchangeCode(r.Context(), code)
 	if err != nil {
 		s.logger.Error("oauth: token exchange", "error", err)
-		renderOAuthHTML(w, http.StatusBadGateway, "Token exchange failed", err.Error())
+		renderOAuthHTML(w, http.StatusBadGateway, "Token exchange failed", "The Tesla token exchange did not succeed. See server logs for details.")
 		return
 	}
 	if strings.TrimSpace(tokens.RefreshToken) == "" {
@@ -152,13 +150,13 @@ func (s *oauthServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request
 
 	if err := writeRefreshTokenFile(s.cfg.TeslaTokenPath, tokens.RefreshToken); err != nil {
 		s.logger.Error("oauth: write refresh token", "error", err)
-		renderOAuthHTML(w, http.StatusInternalServerError, "Token persistence failed", err.Error())
+		renderOAuthHTML(w, http.StatusInternalServerError, "Token persistence failed", "Could not persist the Tesla refresh token. See server logs for details.")
 		return
 	}
 
 	if err := s.vehicle.SetRefreshToken(r.Context(), tokens.RefreshToken); err != nil {
 		s.logger.Error("oauth: activate refresh token", "error", err)
-		renderOAuthHTML(w, http.StatusBadGateway, "Token activation failed", err.Error())
+		renderOAuthHTML(w, http.StatusBadGateway, "Token activation failed", "Could not activate the Tesla refresh token. See server logs for details.")
 		return
 	}
 

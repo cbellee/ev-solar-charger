@@ -249,7 +249,7 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 			Handler: handler,
 			TLSConfig: &tls.Config{
 				GetCertificate: certManager.GetCertificate,
-				MinVersion:     tls.VersionTLS12,
+				MinVersion:     tls.VersionTLS13,
 			},
 		}
 

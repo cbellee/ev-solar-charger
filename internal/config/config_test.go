@@ -18,6 +18,7 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
 	t.Setenv("OAUTH_STATE_HMAC_KEY", "test-hmac-key")
 	t.Setenv("TESLA_TOKEN_PATH", "/data/tesla-refresh-token")
+	t.Setenv("HTTP_AUTH_USER", "test-user")
 	t.Setenv("HTTP_AUTH_PASSWORD", "test-password")
 }
 
@@ -118,8 +119,8 @@ func Test_Load_defaultsApplied(t *testing.T) {
 	if cfg.HTTPHost != "127.0.0.1" {
 		t.Errorf("HTTPHost = %q, want %q", cfg.HTTPHost, "127.0.0.1")
 	}
-	if cfg.HTTPAuthUser != "admin" {
-		t.Errorf("HTTPAuthUser = %q, want %q", cfg.HTTPAuthUser, "admin")
+	if cfg.HTTPAuthUser != "test-user" {
+		t.Errorf("HTTPAuthUser = %q, want %q", cfg.HTTPAuthUser, "test-user")
 	}
 	if cfg.DBRetentionDays != 365 {
 		t.Errorf("DBRetentionDays = %d, want 365", cfg.DBRetentionDays)
@@ -265,6 +266,7 @@ func Test_Load_invalidHTTPPort(t *testing.T) {
 
 func Test_Load_testModeSkipsTeslaCredentials(t *testing.T) {
 	t.Setenv("SUNGROW_HOST", "192.168.1.100")
+	t.Setenv("HTTP_AUTH_USER", "test-user")
 	t.Setenv("HTTP_AUTH_PASSWORD", "test-password")
 	t.Setenv("TESLA_TEST_MODE", "true")
 

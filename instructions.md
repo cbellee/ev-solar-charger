@@ -193,7 +193,14 @@ cp /path/to/your/fleet-key.pem secrets/fleet-key.pem
 docker compose up -d
 ```
 
-The dashboard is available at `http://localhost:8080` and is protected with HTTP basic auth using `HTTP_AUTH_USER` and `HTTP_AUTH_PASSWORD`.
+The dashboard is available at `http://localhost:8080` and is protected with HTTP basic auth using `HTTP_AUTH_USER` and `HTTP_AUTH_PASSWORD`. Both variables are required; there is no default username.
+
+#### Security notes
+
+- State-changing JSON APIs (`POST /api/control`, `POST /api/mode`) require `Content-Type: application/json` and reject request bodies larger than 4 KiB. This blocks simple cross-site form-based CSRF and bounds memory usage.
+- When TLS is enabled, the HTTPS listener requires TLS 1.3 or newer.
+- OAuth callback errors are logged server-side; only generic messages are shown in the browser. Check application logs for full error detail.
+- Never commit `.env`, `secrets/`, or `*.pem` files. The repository ships with `.gitignore` and `.dockerignore` rules that exclude these paths; if any secret was previously committed, rotate it.
 
 ### Build and Publish with GitHub Actions (GHCR)
 
@@ -413,7 +420,7 @@ All configuration is via environment variables:
 | `TESLA_CHARGING_POLL_SECONDS` | No | `60` | Seconds between Tesla API polls while charging |
 | `TESLA_IDLE_POLL_SECONDS` | No | `300` | Seconds between Tesla API polls when idle with surplus |
 | `AMPS_CHANGE_THRESHOLD` | No | `2` | Minimum amp change to send a `SetChargingAmps` command |
-| `HTTP_AUTH_USER` | No | `admin` | HTTP basic auth username for the dashboard and API |
+| `HTTP_AUTH_USER` | Yes | — | HTTP basic auth username for the dashboard and API |
 | `HTTP_AUTH_PASSWORD` | Yes | — | HTTP basic auth password for the dashboard and API |
 | `HTTP_PORT` | No | `8080` | Web server port |
 | `TLS_ENABLED` | No | `false` | Enable HTTPS listener with Let's Encrypt autocert |
