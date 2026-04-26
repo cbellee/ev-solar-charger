@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/cbellee/solar-ev-charger/internal/controller"
+	"github.com/cbellee/ev-solar-charger/internal/controller"
 )
 
 // Hub manages SSE client connections and broadcasts state updates.

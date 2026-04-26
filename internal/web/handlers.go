@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cbellee/solar-ev-charger/internal/controller"
-	"github.com/cbellee/solar-ev-charger/internal/storage"
+	"github.com/cbellee/ev-solar-charger/internal/controller"
+	"github.com/cbellee/ev-solar-charger/internal/storage"
 )
 
 //go:embed templates/index.html

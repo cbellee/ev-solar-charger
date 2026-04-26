@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cbellee/solar-ev-charger/internal/config"
-	"github.com/cbellee/solar-ev-charger/internal/inverter"
-	"github.com/cbellee/solar-ev-charger/internal/storage"
-	"github.com/cbellee/solar-ev-charger/internal/tesla"
+	"github.com/cbellee/ev-solar-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/inverter"
+	"github.com/cbellee/ev-solar-charger/internal/storage"
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
 
 // mockInverter implements inverter.InverterReader.

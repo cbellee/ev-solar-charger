@@ -5,10 +5,10 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/cbellee/solar-ev-charger/internal/config"
-	"github.com/cbellee/solar-ev-charger/internal/controller"
-	"github.com/cbellee/solar-ev-charger/internal/storage"
-	"github.com/cbellee/solar-ev-charger/internal/tesla"
+	"github.com/cbellee/ev-solar-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/controller"
+	"github.com/cbellee/ev-solar-charger/internal/storage"
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 

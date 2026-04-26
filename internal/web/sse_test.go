@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cbellee/solar-ev-charger/internal/controller"
+	"github.com/cbellee/ev-solar-charger/internal/controller"
 )
 
 type nonFlusherResponseWriter struct {

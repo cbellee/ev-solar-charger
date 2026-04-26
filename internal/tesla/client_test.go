@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cbellee/solar-ev-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/config"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

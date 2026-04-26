@@ -180,11 +180,42 @@ cp .env.example .env
 # Edit .env with your actual values
 ```
 
-### 2. Add Tesla Fleet API private key (optional)
+### 2. Generate the Tesla Fleet API keypair
+
+The Tesla Fleet API uses an EC P-256 (`prime256v1`) keypair. The private key signs vehicle commands; the public key is served at `/.well-known/appspecific/com.tesla.3p.public-key.pem` for Tesla domain verification and virtual key pairing.
+
+Use the helper script:
+
+```bash
+./scripts/generate-tesla-key.sh
+```
+
+This writes:
+
+- `secrets/fleet-key.pem` (private key, `chmod 600`) -> mounted to `/secrets/fleet-key.pem`
+- `secrets/com.tesla.3p.public-key.pem` (public key) -> mounted to `/secrets/com.tesla.3p.public-key.pem`
+
+Optional environment variables:
+
+- `SECRETS_DIR` to write keys to a different directory (default `./secrets`)
+- `FORCE=1` to overwrite existing key files
+
+After generation:
+
+1. Confirm `TESLA_PRIVATE_KEY_PATH` and `TESLA_PUBLIC_KEY_PEM_PATH` in `.env` point to the mounted files.
+2. Once the app is reachable over HTTPS, verify the public key URL returns HTTP 200:
+   `https://<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem`
+3. Pair the virtual key to the vehicle by visiting `https://tesla.com/_ak/<your-domain>` on a phone signed in to the Tesla app.
+
+If you ever leak the private key, regenerate the keypair with `FORCE=1`, redeploy, re-verify the domain, and re-pair the vehicle.
+
+If you already have a `fleet-key.pem` from another source, you can place it manually instead:
 
 ```bash
 mkdir -p secrets
 cp /path/to/your/fleet-key.pem secrets/fleet-key.pem
+chmod 600 secrets/fleet-key.pem
+openssl ec -in secrets/fleet-key.pem -pubout -out secrets/com.tesla.3p.public-key.pem
 ```
 
 ### 3. Start the container
@@ -444,7 +475,7 @@ The following items must be completed by the user before running against real ha
     - Use a domain that does not include `tesla` (for example `ev.bellee.net`).
     - Configure Cloudflare record as DNS-only so Tesla validation can pass.
 2. **Complete the OAuth2 authorization code flow** once to obtain an initial `refresh_token`. Tesla's documentation walks through this process — it involves directing the user to Tesla's auth page, receiving a callback with an authorization code, and exchanging it for tokens.
-3. **Generate and pair a Fleet API virtual key** (EC P-256 private key) if your vehicle requires command signing. The key must be paired to the vehicle via the Tesla app. Place the `.pem` file in `./secrets/fleet-key.pem`.
+3. **Generate and pair a Fleet API virtual key** (EC P-256 private key) if your vehicle requires command signing. Run `./scripts/generate-tesla-key.sh` to create `secrets/fleet-key.pem` and `secrets/com.tesla.3p.public-key.pem`, then pair the key to the vehicle via `https://tesla.com/_ak/<your-domain>`.
 
 ### Network & Hardware
 

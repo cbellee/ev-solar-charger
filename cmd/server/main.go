@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cbellee/solar-ev-charger/internal/config"
-	"github.com/cbellee/solar-ev-charger/internal/controller"
-	"github.com/cbellee/solar-ev-charger/internal/inverter"
-	"github.com/cbellee/solar-ev-charger/internal/observability"
-	"github.com/cbellee/solar-ev-charger/internal/storage"
-	"github.com/cbellee/solar-ev-charger/internal/tesla"
-	"github.com/cbellee/solar-ev-charger/internal/web"
+	"github.com/cbellee/ev-solar-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/controller"
+	"github.com/cbellee/ev-solar-charger/internal/inverter"
+	"github.com/cbellee/ev-solar-charger/internal/observability"
+	"github.com/cbellee/ev-solar-charger/internal/storage"
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
+	"github.com/cbellee/ev-solar-charger/internal/web"
 	"golang.org/x/crypto/acme/autocert"
 )
 

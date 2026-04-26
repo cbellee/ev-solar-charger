@@ -1,4 +1,4 @@
-module github.com/cbellee/solar-ev-charger
+module github.com/cbellee/ev-solar-charger
 
 go 1.25.0
 

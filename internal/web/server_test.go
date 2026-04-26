@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/cbellee/solar-ev-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/config"
 )
 
 func oauthTestConfig() config.Config {

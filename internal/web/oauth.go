@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cbellee/solar-ev-charger/internal/config"
-	"github.com/cbellee/solar-ev-charger/internal/tesla"
+	"github.com/cbellee/ev-solar-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
 
 const (

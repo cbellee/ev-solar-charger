@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cbellee/solar-ev-charger/internal/config"
-	"github.com/cbellee/solar-ev-charger/internal/tesla"
+	"github.com/cbellee/ev-solar-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
 
 type oauthRoundTripFunc func(*http.Request) (*http.Response, error)

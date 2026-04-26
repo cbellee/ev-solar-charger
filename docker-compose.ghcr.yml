@@ -1,4 +1,3 @@
 services:
   solar-ev-charger:
-    image: ghcr.io/cbellee/solar-ev-charger-controller:latest
-    pull_policy: always
+    image: ghcr.io/cbellee/ev-solar-charger:latest
