@@ -21,7 +21,7 @@ All data is persisted in a SQLite database for historical reporting and searchab
 - **Interface-driven testability** — all external systems (inverter, vehicle, storage) accessed via narrow Go interfaces; concrete implementations injected at startup; tests use hand-written mocks
 - **Observable** — OpenTelemetry traces, metrics, and logs via `otelslog` bridge to `log/slog`; stdout export by default, OTLP collector when configured
 - **HTTP client discipline** — client structs hold only configuration and dependencies (base URL, `*http.Client`, auth, logger); never store `*http.Request` or per-request state on the struct; construct a fresh request per method call; set `req.GetBody` for retry/redirect body reuse; always `defer resp.Body.Close()`
-- **Concurrency safety** — use `sync.Mutex` / `sync.RWMutex` for protecting shared state; keep critical sections small; always know how a goroutine will exit; use `sync.WaitGroup` classic `Add`/`Done` pattern (Go <1.25)
+- **Concurrency safety** — use `sync.Mutex` / `sync.RWMutex` for protecting shared state; keep critical sections small; always know how a goroutine will exit; use `sync.WaitGroup.Go` (Go 1.25+)
 - **Security** — validate all external input; sanitize FTS5 queries; use `crypto/rand` for randomness; TLS for Tesla API; no secrets in logs
 
 ### Hardware
@@ -46,7 +46,7 @@ This project follows the coding standards defined in [`.github/copilot-instructi
 | **Types** | Use `any` not `interface{}`; prefer generics with constraints; use struct tags for JSON; explicit type conversions |
 | **HTTP clients** | Struct holds config only (base URL, `*http.Client`, auth); never store `*http.Request`; build fresh request per call; set `req.GetBody` for retries; `defer resp.Body.Close()` |
 | **IO / Readers** | Readers are single-use; buffer with `io.ReadAll` + `bytes.NewReader` for reuse; use `io.NopCloser` for request body reset |
-| **Concurrency** | Use `sync.WaitGroup` classic `Add`/`Done` (Go <1.25); goroutines must have known exit paths; prefer caller-controlled concurrency in libraries |
+| **Concurrency** | Use `sync.WaitGroup.Go` (Go 1.25+); goroutines must have known exit paths; prefer caller-controlled concurrency in libraries |
 | **Testing** | Table-driven tests; `Test_functionName_scenario` naming; `t.Helper()` on helpers; `t.Cleanup()` for resource teardown; `-race` flag; `_test` package for black-box tests |
 | **Formatting** | `gofmt` + `goimports`; no emoji in code; comments in complete sentences starting with the symbol name |
 | **Router** | Use enhanced `net/http` `ServeMux` with method+pattern routing (Go 1.22+) |
@@ -77,9 +77,10 @@ solar-ev-charger/
 │   │   ├── sungrow.go                      # SungrowClient implementing InverterReader
 │   │   └── sungrow_test.go                 # httptest mock for HTTP registers + WebSocket connect
 │   ├── tesla/
-│   │   ├── tesla.go                        # VehicleController interface + ChargeState struct + sentinel errors
+│   │   ├── tesla.go                        # VehicleController interface + ChargeState struct + APIUsage types + sentinel errors
 │   │   ├── client.go                       # TeslaClient implementing VehicleController
-│   │   └── client_test.go                  # httptest mock for Fleet API endpoints
+│   │   ├── testmode.go                     # TestModeClient: no-op VehicleController for TESLA_TEST_MODE
+│   │   └── client_test.go                  # httptest mock for Fleet API endpoints + APIUsageTracker tests
 │   ├── controller/
 │   │   ├── controller.go                   # State machine + control loop + Tick() + 1-min averaging
 │   │   └── controller_test.go              # State transitions, surplus math, deadband, wake logic, storage flush
@@ -91,11 +92,13 @@ solar-ev-charger/
 │       ├── sse_test.go                     # Broadcast, subscribe, disconnect cleanup
 │       └── templates/
 │           └── index.html                  # Dashboard: Tailwind CSS + htmx + EventSource + history/search
-├── Dockerfile                              # Multi-stage: golang:1.23-alpine → distroless/static
+├── Dockerfile                              # Multi-stage: golang:1.25-alpine → distroless/static
 ├── docker-compose.yml                      # Single service, port 8080, secrets volume, data volume, env_file
 ├── .env.example                            # Documented env var template with defaults
 ├── go.mod
-└── go.sum
+├── go.sum
+├── function/                               # Azure Function app for Tesla OAuth flow (separate go.mod)
+└── infra/                                  # Azure infrastructure (Bicep templates)
 ```
 
 ---
@@ -120,7 +123,13 @@ All configuration is read from environment variables at startup. No config files
 | `LINE_VOLTAGE` | no | `240` | Mains voltage for watts-to-amps conversion |
 | `DEADBAND_POLLS` | no | `3` | Consecutive low-surplus polls before stopping charge |
 | `WAKE_THRESHOLD_POLLS` | no | `6` | Consecutive surplus polls before waking sleeping car |
+| `TESLA_CHARGING_POLL_SECONDS` | no | `60` | Seconds between Tesla API polls while actively charging |
+| `TESLA_IDLE_POLL_SECONDS` | no | `300` | Seconds between Tesla API polls when idle with surplus |
+| `AMPS_CHANGE_THRESHOLD` | no | `2` | Minimum amp change required to send a `SetChargingAmps` command |
+| `TESLA_TEST_MODE` | no | `false` | Skip Tesla connectivity; publish projected charging values only |
 | `HTTP_PORT` | no | `8080` | Web UI and API listen port |
+| `HTTP_AUTH_USER` | no | `admin` | HTTP basic auth username |
+| `HTTP_AUTH_PASSWORD` | **yes** | — | HTTP basic auth password |
 | `LOG_LEVEL` | no | `info` | Minimum slog level: `debug`, `info`, `warn`, `error` |
 | `DB_PATH` | no | `/data/solar-ev-charger.db` | Path to SQLite database file |
 | `DB_RETENTION_DAYS` | no | `365` | Auto-prune records older than this |
@@ -137,7 +146,7 @@ All configuration is read from environment variables at startup. No config files
 ```
 module github.com/cbellee/solar-ev-charger
 
-go 1.23
+go 1.25
 
 require (
     github.com/teslamotors/vehicle-command          // Tesla Virtual Key signing + Fleet API commands
@@ -172,24 +181,31 @@ Define a `Config` struct with exported fields. `Load()` reads env vars via `os.G
 
 ```go
 type Config struct {
-    SungrowHost         string
-    SungrowPort         int
-    TeslaClientID       string
-    TeslaClientSecret   string
-    TeslaRefreshToken   string
-    TeslaVIN            string
-    TeslaPrivateKeyPath string
-    TeslaRegion         string
-    PollInterval        time.Duration
-    MinChargeAmps       int
-    MaxChargeAmps       int
-    LineVoltage         int
-    DeadbandPolls       int
-    WakeThresholdPolls  int
-    HTTPPort            int
-    LogLevel            slog.Level
-    DBPath              string
-    DBRetentionDays     int
+    SungrowHost               string
+    SungrowPort               int
+    TeslaClientID             string
+    TeslaClientSecret         string
+    TeslaRefreshToken         string
+    TeslaVIN                  string
+    TeslaPrivateKeyPath       string
+    TeslaRegion               string
+    TeslaTestMode             bool
+    PollInterval              time.Duration
+    MinChargeAmps             int
+    MaxChargeAmps             int
+    LineVoltage               int
+    DeadbandPolls             int
+    WakeThresholdPolls        int
+    TeslaChargingPollInterval time.Duration
+    TeslaIdlePollInterval     time.Duration
+    AmpsChangeThreshold       int
+    HTTPHost                  string
+    HTTPPort                  int
+    HTTPAuthUser              string
+    HTTPAuthPassword          string
+    LogLevel                  slog.Level
+    DBPath                    string
+    DBRetentionDays           int
 }
 
 func Load() (Config, error)
@@ -386,6 +402,10 @@ type Store interface {
 
     // Search — full-text search across events
     Search(ctx context.Context, query string, from, to time.Time, limit int) ([]Event, error)
+
+    // Tesla API usage
+    InsertAPIUsage(ctx context.Context, s APIUsageSnapshot) error
+    QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]APIUsageSnapshot, error)
 
     // Maintenance
     Prune(ctx context.Context, olderThan time.Duration) (int64, error)  // returns rows deleted
@@ -672,6 +692,7 @@ type VehicleController interface {
     StartCharging(ctx context.Context) error
     StopCharging(ctx context.Context) error
     WakeUp(ctx context.Context) error
+    GetAPIUsage() APIUsage
 }
 ```
 
@@ -827,7 +848,7 @@ This is the core logic. The controller runs a background goroutine that periodic
 **Go best practices applied (per `.github/copilot-instructions.md`):**
 - **Concurrency**: The controller owns a single goroutine (`Run`); caller controls lifecycle via `context.Context`. All goroutine exit paths are defined (context cancellation + graceful flush).
 - **Sync**: `sync.RWMutex` protects snapshot/state; readers (`StateSnapshot`) use `RLock`, writers (`transitionTo`, `Tick`) use `Lock`. Critical sections are minimal.
-- **WaitGroup**: Go 1.23 < 1.25, so use classic `Add`/`Done` pattern (not `WaitGroup.Go`)
+- **WaitGroup**: Go 1.25, so use `WaitGroup.Go` method
 - **Interfaces**: `InverterReader`, `VehicleController`, and `Store` are defined close to where they are consumed (in this package or their respective packages), not in a shared `types` package
 - **Error handling**: errors are wrapped with `%w` and lowercase messages; errors are logged **or** returned, never both
 - **Zero values**: `Controller` zero state is idle/auto, which is a safe default
@@ -890,6 +911,11 @@ type Controller struct {
     consecutiveSurplus int    // ticks with viable surplus (for wake)
     lastChargeAmps     int    // last amps sent to vehicle
 
+    // Cost-aware Tesla API polling
+    lastTeslaPoll      time.Time  // when Tesla API was last called
+    cachedChargeState  ChargeState
+    hasCachedState     bool
+
     // 1-minute averaging for DB persistence
     accumulator        []accSample
     currentMinute      time.Time
@@ -927,15 +953,27 @@ func (c *Controller) Tick(ctx context.Context)
     //     c.transitionTo(ctx, StateError, err.Error())
     //     return
 
-    // --- STEP 2: Read vehicle state ---
-    // chargeState, err = c.vehicle.GetChargeState(ctx)
-    // if errors.Is(err, tesla.ErrCarOffline):
-    //     (car is asleep — handle in wake logic below)
-    //     chargeState = ChargeState{IsOnline: false}
-    // else if err != nil:
-    //     c.logger.ErrorContext(ctx, "tesla read failed", "error", err)
-    //     c.transitionTo(ctx, StateError, err.Error())
-    //     return
+    // --- STEP 2: Read vehicle state (cost-aware) ---
+    // Cost-aware polling: only call Tesla API when shouldPollTesla() returns true.
+    // Between API calls, use cached charge state. The inverter (local/free) is
+    // always polled, but Tesla Fleet API calls ($0.002 each) are gated:
+    //   - No cached state → poll immediately
+    //   - Charging → poll every TeslaChargingPollInterval (default 60s)
+    //   - Idle with surplus ≥ min amps → poll every TeslaIdlePollInterval (default 300s)
+    //   - Idle without surplus → skip (no reason to call Tesla)
+    //   - Wake pending → skip (wake command handles its own polling)
+    //
+    // if c.shouldPollTesla(availableAmps):
+    //     chargeState, err = c.vehicle.GetChargeState(ctx)
+    //     if errors.Is(err, tesla.ErrCarOffline):
+    //         chargeState = ChargeState{IsOnline: false}
+    //     else if err != nil:
+    //         c.logger.ErrorContext(ctx, "tesla read failed", "error", err)
+    //         c.transitionTo(ctx, StateError, err.Error())
+    //         return
+    //     c.setCachedChargeState(chargeState)
+    // else:
+    //     chargeState = c.getCachedChargeState()
 
     // --- STEP 3: Check preconditions ---
     // if !chargeState.PluggedIn && chargeState.IsOnline:
@@ -981,8 +1019,8 @@ func (c *Controller) Tick(ctx context.Context)
     //             c.lastChargeAmps = availableAmps
     //         return
     //
-    //     // Car IS charging — adjust amps if different
-    //     if availableAmps != c.lastChargeAmps:
+    //     // Car IS charging — adjust amps if delta >= AmpsChangeThreshold
+    //     if abs(availableAmps - c.lastChargeAmps) >= c.cfg.AmpsChangeThreshold:
     //         err = c.vehicle.SetChargingAmps(ctx, availableAmps)
     //         if err != nil:
     //             c.logger.WarnContext(ctx, "set amps failed", "error", err)
@@ -1264,6 +1302,8 @@ func NewServer(ctrl *controller.Controller, store storage.Store, logger *slog.Lo
     // mux.HandleFunc("GET /api/sessions", handleSessions(store))
     // mux.HandleFunc("GET /api/events", handleEvents(store))
     // mux.HandleFunc("GET /api/search", handleSearch(store))
+    // mux.HandleFunc("GET /api/usage", handleAPIUsage(ctrl))
+    // mux.HandleFunc("GET /api/usage/history", handleAPIUsageHistory(store))
     // mux.HandleFunc("GET /auth/tesla", handleTeslaAuth)
     // mux.HandleFunc("GET /auth/tesla/callback", handleTeslaCallback)
     // mux.HandleFunc("GET /healthz", handleHealthz)
@@ -1331,6 +1371,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request)
 | `GET` | `/api/sessions` | `from`, `to`, `limit`, `offset` | `[]ChargeSession` JSON |
 | `GET` | `/api/events` | `from`, `to`, `type`, `limit`, `offset` | `[]Event` JSON |
 | `GET` | `/api/search` | `q`, `from`, `to`, `limit` | `[]Event` JSON (FTS5) |
+| `GET` | `/api/usage` | — | Current month Tesla API usage counters + estimated cost |
+| `GET` | `/api/usage/history` | `from`, `to`, `limit` | `[]APIUsageSnapshot` JSON (historical) |
 | `GET` | `/auth/tesla` | — | OAuth2 redirect |
 | `GET` | `/auth/tesla/callback` | `code` | Token exchange |
 | `GET` | `/healthz` | — | `{"status":"ok"}` |

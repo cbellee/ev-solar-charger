@@ -44,6 +44,7 @@ type TeslaClient struct {
 	metrics      *observability.Metrics
 	minAmps      int
 	maxAmps      int
+	usage        *APIUsageTracker
 
 	mu           sync.Mutex
 	accessToken  string
@@ -86,6 +87,7 @@ func New(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics)
 		minAmps:      cfg.MinChargeAmps,
 		maxAmps:      cfg.MaxChargeAmps,
 		refreshToken: cfg.TeslaRefreshToken,
+		usage:        NewAPIUsageTracker(),
 	}
 
 	if err := c.refreshAccessToken(context.Background()); err != nil {
@@ -226,6 +228,7 @@ func (c *TeslaClient) doRequest(ctx context.Context, method, path string, body a
 
 // GetChargeState retrieves the vehicle's current charge state.
 func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
+	c.usage.RecordData()
 	path := fmt.Sprintf("/api/1/vehicles/%s/vehicle_data?endpoints=charge_state", c.vin)
 	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -267,6 +270,7 @@ func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
 
 // SetChargingAmps sets the charging amperage, clamped to min/max.
 func (c *TeslaClient) SetChargingAmps(ctx context.Context, amps int) error {
+	c.usage.RecordCommand()
 	if amps < c.minAmps {
 		amps = c.minAmps
 	}
@@ -290,6 +294,7 @@ func (c *TeslaClient) SetChargingAmps(ctx context.Context, amps int) error {
 
 // StartCharging starts the vehicle's charging session.
 func (c *TeslaClient) StartCharging(ctx context.Context) error {
+	c.usage.RecordCommand()
 	path := fmt.Sprintf("/api/1/vehicles/%s/command/charge_start", c.vin)
 	resp, err := c.doRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {
@@ -305,6 +310,7 @@ func (c *TeslaClient) StartCharging(ctx context.Context) error {
 
 // StopCharging stops the vehicle's charging session.
 func (c *TeslaClient) StopCharging(ctx context.Context) error {
+	c.usage.RecordCommand()
 	path := fmt.Sprintf("/api/1/vehicles/%s/command/charge_stop", c.vin)
 	resp, err := c.doRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {
@@ -320,6 +326,7 @@ func (c *TeslaClient) StopCharging(ctx context.Context) error {
 
 // WakeUp wakes the vehicle, polling until online or timeout.
 func (c *TeslaClient) WakeUp(ctx context.Context) error {
+	c.usage.RecordWake()
 	path := fmt.Sprintf("/api/1/vehicles/%s/wake_up", c.vin)
 	resp, err := c.doRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {
@@ -341,4 +348,22 @@ func (c *TeslaClient) WakeUp(ctx context.Context) error {
 		}
 	}
 	return fmt.Errorf("tesla: wake_up timed out after 30s")
+}
+
+// GetAPIUsage returns the current monthly API usage snapshot.
+func (c *TeslaClient) GetAPIUsage() APIUsage {
+	return c.usage.Snapshot()
+}
+
+// SetRefreshToken updates the refresh token and immediately refreshes the access token.
+func (c *TeslaClient) SetRefreshToken(ctx context.Context, refreshToken string) error {
+	if strings.TrimSpace(refreshToken) == "" {
+		return fmt.Errorf("tesla: refresh token is required")
+	}
+
+	c.mu.Lock()
+	c.refreshToken = refreshToken
+	c.mu.Unlock()
+
+	return c.refreshAccessToken(ctx)
 }

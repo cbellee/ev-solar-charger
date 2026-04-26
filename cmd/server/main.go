@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/cbellee/solar-ev-charger/internal/storage"
 	"github.com/cbellee/solar-ev-charger/internal/tesla"
 	"github.com/cbellee/solar-ev-charger/internal/web"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 type runtimeDeps struct {
@@ -31,7 +34,7 @@ type runtimeDeps struct {
 	newStore     func(string, *slog.Logger) (storage.Store, error)
 	newInverter  func(string, int, *slog.Logger, *observability.Metrics) inverter.InverterReader
 	newVehicle   func(config.Config, *slog.Logger, *observability.Metrics) (tesla.VehicleController, error)
-	newServer    func(*controller.Controller, storage.Store, *web.Hub, *slog.Logger, web.AuthConfig) http.Handler
+	newServer    func(*controller.Controller, storage.Store, *web.Hub, *slog.Logger, web.AuthConfig, config.Config, tesla.VehicleController) http.Handler
 	newHub       func(*slog.Logger) *web.Hub
 }
 
@@ -168,6 +171,15 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 		logger.Info("tesla test mode enabled", "message", "vehicle commands disabled; publishing projected surplus only")
 		vehicle = tesla.NewTestModeController()
 	} else {
+		if strings.TrimSpace(cfg.TeslaRefreshToken) == "" {
+			if tokenBytes, readErr := os.ReadFile(cfg.TeslaTokenPath); readErr == nil {
+				cfg.TeslaRefreshToken = strings.TrimSpace(string(tokenBytes))
+			}
+		}
+		if strings.TrimSpace(cfg.TeslaRefreshToken) == "" {
+			return fmt.Errorf("failed to create tesla client: TESLA_REFRESH_TOKEN is empty and token file %q was not usable", cfg.TeslaTokenPath)
+		}
+
 		vehicle, err = deps.newVehicle(cfg, logger, metrics)
 		if err != nil {
 			return fmt.Errorf("failed to create tesla client: %w", err)
@@ -185,7 +197,7 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	handler := deps.newServer(ctrl, store, hub, logger, web.AuthConfig{
 		Username: cfg.HTTPAuthUser,
 		Password: cfg.HTTPAuthPassword,
-	})
+	}, cfg, vehicle)
 
 	// 11. Start controller loop.
 	go ctrl.Run(ctx)
@@ -217,10 +229,45 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 		}
 	}()
 
-	// 13. Start HTTP server.
-	srv := &http.Server{
+	// 13. Start primary HTTP server.
+	primaryHTTPServer := &http.Server{
 		Addr:    net.JoinHostPort(cfg.HTTPHost, strconv.Itoa(cfg.HTTPPort)),
 		Handler: handler,
+	}
+	servers := []*http.Server{primaryHTTPServer}
+	startFns := []func() error{func() error { return primaryHTTPServer.ListenAndServe() }}
+
+	if cfg.TLSEnabled {
+		certManager := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(cfg.TLSDomain),
+			Cache:      autocert.DirCache(cfg.TLSCertDir),
+		}
+
+		tlsServer := &http.Server{
+			Addr:    net.JoinHostPort(cfg.HTTPHost, strconv.Itoa(cfg.TLSPort)),
+			Handler: handler,
+			TLSConfig: &tls.Config{
+				GetCertificate: certManager.GetCertificate,
+				MinVersion:     tls.VersionTLS12,
+			},
+		}
+
+		challengeAndRedirectHandler := certManager.HTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			httpsURL := "https://" + cfg.TLSDomain + r.URL.RequestURI()
+			http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
+		}))
+
+		challengeServer := &http.Server{
+			Addr:    net.JoinHostPort(cfg.HTTPHost, strconv.Itoa(cfg.HTTPChallengePort)),
+			Handler: challengeAndRedirectHandler,
+		}
+
+		servers = append(servers, tlsServer, challengeServer)
+		startFns = append(startFns,
+			func() error { return tlsServer.ListenAndServeTLS("", "") },
+			func() error { return challengeServer.ListenAndServe() },
+		)
 	}
 
 	// 14. Graceful shutdown.
@@ -230,12 +277,15 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 
 	serverErrCh := make(chan error, 1)
 
-	go func() {
-		logger.Info("server starting", "host", cfg.HTTPHost, "port", cfg.HTTPPort)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serverErrCh <- err
-		}
-	}()
+	for i, startFn := range startFns {
+		srv := servers[i]
+		go func(s *http.Server, fn func() error) {
+			logger.Info("server starting", "addr", s.Addr)
+			if err := fn(); err != nil && err != http.ErrServerClosed {
+				serverErrCh <- err
+			}
+		}(srv, startFn)
+	}
 
 	select {
 	case err := <-serverErrCh:
@@ -250,8 +300,10 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("shutdown http server: %w", err)
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("shutdown server %s: %w", srv.Addr, err)
+		}
 	}
 
 	return nil

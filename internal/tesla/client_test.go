@@ -116,6 +116,7 @@ func newTestClient(t *testing.T, fleetHandler, authHandler http.Handler) (*Tesla
 		accessToken:  "test-access",
 		minAmps:      5,
 		maxAmps:      32,
+		usage:        NewAPIUsageTracker(),
 	}
 	return c, &testServer{fleet: fleet, auth: auth}
 }
@@ -446,5 +447,140 @@ func Test_New_initialTokenRefreshFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "initial token refresh") {
 		t.Fatalf("expected initial token refresh error, got %v", err)
+	}
+}
+
+func Test_APIUsageTracker_recordsAllTypes(t *testing.T) {
+	tracker := NewAPIUsageTracker()
+	tracker.RecordData()
+	tracker.RecordData()
+	tracker.RecordCommand()
+	tracker.RecordCommand()
+	tracker.RecordCommand()
+	tracker.RecordWake()
+
+	snap := tracker.Snapshot()
+	if snap.DataCalls != 2 {
+		t.Errorf("DataCalls = %d, want 2", snap.DataCalls)
+	}
+	if snap.CommandCalls != 3 {
+		t.Errorf("CommandCalls = %d, want 3", snap.CommandCalls)
+	}
+	if snap.WakeCalls != 1 {
+		t.Errorf("WakeCalls = %d, want 1", snap.WakeCalls)
+	}
+	if snap.StreamSignals != 0 {
+		t.Errorf("StreamSignals = %d, want 0", snap.StreamSignals)
+	}
+}
+
+func Test_APIUsageTracker_estimatedCost(t *testing.T) {
+	tracker := NewAPIUsageTracker()
+	// 500 data calls = $1.00, 1000 commands = $1.00, 50 wakes = $1.00
+	for range 500 {
+		tracker.RecordData()
+	}
+	for range 1000 {
+		tracker.RecordCommand()
+	}
+	for range 50 {
+		tracker.RecordWake()
+	}
+
+	snap := tracker.Snapshot()
+	wantCost := 3.0
+	if snap.EstimatedCost < wantCost-0.001 || snap.EstimatedCost > wantCost+0.001 {
+		t.Errorf("EstimatedCost = %f, want %f", snap.EstimatedCost, wantCost)
+	}
+}
+
+func Test_APIUsageTracker_monthReset(t *testing.T) {
+	tracker := NewAPIUsageTracker()
+	tracker.RecordData()
+	tracker.RecordCommand()
+
+	// Manually set month to last month to trigger reset.
+	tracker.mu.Lock()
+	tracker.monthStart = tracker.monthStart.AddDate(0, -1, 0)
+	tracker.mu.Unlock()
+
+	tracker.RecordData()
+	snap := tracker.Snapshot()
+	if snap.DataCalls != 1 {
+		t.Errorf("DataCalls after month reset = %d, want 1", snap.DataCalls)
+	}
+	if snap.CommandCalls != 0 {
+		t.Errorf("CommandCalls after month reset = %d, want 0", snap.CommandCalls)
+	}
+}
+
+func Test_GetAPIUsage_returnsTrackerSnapshot(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"charge_state": map[string]any{
+					"charging_state": "Stopped",
+				},
+				"state": "online",
+			},
+		})
+	})
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/command/set_charging_amps", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"result": true}})
+	})
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+
+	c.GetChargeState(context.Background())
+	c.GetChargeState(context.Background())
+	c.SetChargingAmps(context.Background(), 10)
+
+	usage := c.GetAPIUsage()
+	if usage.DataCalls != 2 {
+		t.Errorf("DataCalls = %d, want 2", usage.DataCalls)
+	}
+	if usage.CommandCalls != 1 {
+		t.Errorf("CommandCalls = %d, want 1", usage.CommandCalls)
+	}
+}
+
+func Test_SetRefreshToken_updatesAndRefreshesAccessToken(t *testing.T) {
+	mux := http.NewServeMux()
+	authMux := http.NewServeMux()
+	var seenRefreshToken string
+	authMux.HandleFunc("/oauth2/v3/token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		seenRefreshToken = r.Form.Get("refresh_token")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "rotated-access",
+			"refresh_token": "rotated-refresh",
+			"expires_in":    3600,
+		})
+	})
+	c, _ := newTestClient(t, mux, authMux)
+
+	if err := c.SetRefreshToken(context.Background(), "incoming-refresh"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if seenRefreshToken != "incoming-refresh" {
+		t.Fatalf("seen refresh token = %q, want %q", seenRefreshToken, "incoming-refresh")
+	}
+	if c.accessToken != "rotated-access" {
+		t.Fatalf("accessToken = %q, want %q", c.accessToken, "rotated-access")
+	}
+	if c.refreshToken != "rotated-refresh" {
+		t.Fatalf("refreshToken = %q, want %q", c.refreshToken, "rotated-refresh")
+	}
+}
+
+func Test_SetRefreshToken_emptyFails(t *testing.T) {
+	mux := http.NewServeMux()
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+
+	err := c.SetRefreshToken(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for empty refresh token")
 	}
 }

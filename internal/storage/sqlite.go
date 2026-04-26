@@ -90,6 +90,17 @@ END;
 CREATE TRIGGER IF NOT EXISTS events_ad AFTER DELETE ON events BEGIN
     INSERT INTO events_fts(events_fts, rowid, message, details) VALUES ('delete', old.id, old.message, old.details);
 END;
+
+CREATE TABLE IF NOT EXISTS api_usage_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       DATETIME NOT NULL,
+    data_calls      INTEGER NOT NULL DEFAULT 0,
+    command_calls   INTEGER NOT NULL DEFAULT 0,
+    wake_calls      INTEGER NOT NULL DEFAULT 0,
+    stream_signals  INTEGER NOT NULL DEFAULT 0,
+    estimated_cost  REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_api_usage_timestamp ON api_usage_snapshots(timestamp);
 `
 	_, err := s.db.ExecContext(ctx, ddl)
 	if err != nil {
@@ -332,6 +343,47 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, from, to time.Ti
 	return events, rows.Err()
 }
 
+// InsertAPIUsage persists an API usage snapshot.
+func (s *SQLiteStore) InsertAPIUsage(ctx context.Context, snap APIUsageSnapshot) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO api_usage_snapshots (timestamp, data_calls, command_calls, wake_calls, stream_signals, estimated_cost)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		snap.Timestamp.UTC().Format("2006-01-02 15:04:05"),
+		snap.DataCalls, snap.CommandCalls, snap.WakeCalls, snap.StreamSignals, snap.EstimatedCost)
+	if err != nil {
+		return fmt.Errorf("storage: insert api usage: %w", err)
+	}
+	return nil
+}
+
+// QueryAPIUsage retrieves API usage snapshots within a date range.
+func (s *SQLiteStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]APIUsageSnapshot, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, timestamp, data_calls, command_calls, wake_calls, stream_signals, estimated_cost
+		 FROM api_usage_snapshots WHERE timestamp BETWEEN ? AND ?
+		 ORDER BY timestamp DESC LIMIT ?`,
+		from.UTC().Format("2006-01-02 15:04:05"), to.UTC().Format("2006-01-02 15:04:05"), limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: query api usage: %w", err)
+	}
+	defer rows.Close()
+
+	var snapshots []APIUsageSnapshot
+	for rows.Next() {
+		var s APIUsageSnapshot
+		var ts string
+		if err := rows.Scan(&s.ID, &ts, &s.DataCalls, &s.CommandCalls, &s.WakeCalls, &s.StreamSignals, &s.EstimatedCost); err != nil {
+			return nil, fmt.Errorf("storage: scan api usage: %w", err)
+		}
+		s.Timestamp, _ = time.Parse("2006-01-02 15:04:05", ts)
+		snapshots = append(snapshots, s)
+	}
+	if snapshots == nil {
+		snapshots = []APIUsageSnapshot{}
+	}
+	return snapshots, rows.Err()
+}
+
 // Prune deletes records older than the specified duration and returns the total rows deleted.
 func (s *SQLiteStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan).UTC().Format("2006-01-02 15:04:05")
@@ -354,6 +406,13 @@ func (s *SQLiteStore) Prune(ctx context.Context, olderThan time.Duration) (int64
 	res, err = s.db.ExecContext(ctx, `DELETE FROM events WHERE timestamp < ?`, cutoff)
 	if err != nil {
 		return total, fmt.Errorf("storage: prune events: %w", err)
+	}
+	n, _ = res.RowsAffected()
+	total += n
+
+	res, err = s.db.ExecContext(ctx, `DELETE FROM api_usage_snapshots WHERE timestamp < ?`, cutoff)
+	if err != nil {
+		return total, fmt.Errorf("storage: prune api usage: %w", err)
 	}
 	n, _ = res.RowsAffected()
 	total += n

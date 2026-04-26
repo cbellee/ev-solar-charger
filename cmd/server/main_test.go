@@ -45,6 +45,12 @@ func (fakeStore) QueryEvents(ctx context.Context, from, to time.Time, eventType 
 func (fakeStore) Search(ctx context.Context, query string, from, to time.Time, limit int) ([]storage.Event, error) {
 	return nil, nil
 }
+func (fakeStore) InsertAPIUsage(ctx context.Context, s storage.APIUsageSnapshot) error {
+	return nil
+}
+func (fakeStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
+	return nil, nil
+}
 func (fakeStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (fakeStore) Close() error                                                      { return nil }
 
@@ -65,6 +71,10 @@ func (fakeVehicle) SetChargingAmps(ctx context.Context, amps int) error { return
 func (fakeVehicle) StartCharging(ctx context.Context) error             { return nil }
 func (fakeVehicle) StopCharging(ctx context.Context) error              { return nil }
 func (fakeVehicle) WakeUp(ctx context.Context) error                    { return nil }
+func (fakeVehicle) SetRefreshToken(ctx context.Context, refreshToken string) error {
+	return nil
+}
+func (fakeVehicle) GetAPIUsage() tesla.APIUsage { return tesla.APIUsage{} }
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -74,6 +84,7 @@ func testConfig(port int) config.Config {
 	return config.Config{
 		SungrowHost:        "127.0.0.1",
 		SungrowPort:        8082,
+		TeslaTestMode:      true,
 		PollInterval:       time.Hour,
 		MinChargeAmps:      5,
 		MaxChargeAmps:      32,

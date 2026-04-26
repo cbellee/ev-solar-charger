@@ -206,6 +206,82 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
+// Tesla Fleet API pricing: $10 monthly discount is a shared credit pool
+// across all categories, not per-category free tiers.
+const (
+	costPerData   = 1.0 / 500.0    // $0.002 per data request
+	costPerCmd    = 1.0 / 1000.0   // $0.001 per command
+	costPerWake   = 1.0 / 50.0     // $0.02 per wake
+	costPerStream = 1.0 / 150000.0 // ~$0.0000067 per stream signal
+	monthlyCredit = 10.0           // shared $10 discount pool
+)
+
+type apiUsageResponse struct {
+	DataCalls       int64   `json:"dataCalls"`
+	DataCost        float64 `json:"dataCost"`
+	CommandCalls    int64   `json:"commandCalls"`
+	CommandCost     float64 `json:"commandCost"`
+	WakeCalls       int64   `json:"wakeCalls"`
+	WakeCost        float64 `json:"wakeCost"`
+	StreamSignals   int64   `json:"streamSignals"`
+	StreamCost      float64 `json:"streamCost"`
+	EstimatedCost   float64 `json:"estimatedCost"`
+	MonthlyDiscount float64 `json:"monthlyDiscount"`
+	NetCost         float64 `json:"netCost"`
+	MonthStarted    string  `json:"monthStarted"`
+}
+
+func handleAPIUsage(ctrl *controller.Controller) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		usage := ctrl.GetAPIUsage()
+		dataCost := float64(usage.DataCalls) * costPerData
+		cmdCost := float64(usage.CommandCalls) * costPerCmd
+		wakeCost := float64(usage.WakeCalls) * costPerWake
+		streamCost := float64(usage.StreamSignals) * costPerStream
+		net := usage.EstimatedCost - monthlyCredit
+		if net < 0 {
+			net = 0
+		}
+		resp := apiUsageResponse{
+			DataCalls:       usage.DataCalls,
+			DataCost:        dataCost,
+			CommandCalls:    usage.CommandCalls,
+			CommandCost:     cmdCost,
+			WakeCalls:       usage.WakeCalls,
+			WakeCost:        wakeCost,
+			StreamSignals:   usage.StreamSignals,
+			StreamCost:      streamCost,
+			EstimatedCost:   usage.EstimatedCost,
+			MonthlyDiscount: monthlyCredit,
+			NetCost:         net,
+			MonthStarted:    usage.MonthStarted.Format("2006-01-02"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func handleAPIUsageHistory(store storage.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now()
+		from := parseTimeParam(r, "from", now.Add(-30*24*time.Hour))
+		to := parseTimeParam(r, "to", now)
+		limit := parseIntParam(r, "limit", 1000)
+		if limit > 10000 {
+			limit = 10000
+		}
+
+		snapshots, err := store.QueryAPIUsage(r.Context(), from, to, limit)
+		if err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(snapshots)
+	}
+}
+
 func parseTimeParam(r *http.Request, key string, defaultVal time.Time) time.Time {
 	s := r.URL.Query().Get(key)
 	if s == "" {

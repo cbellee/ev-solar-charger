@@ -75,6 +75,14 @@ func (m *mockVehicle) WakeUp(ctx context.Context) error {
 	return m.wakeErr
 }
 
+func (m *mockVehicle) SetRefreshToken(ctx context.Context, refreshToken string) error {
+	return nil
+}
+
+func (m *mockVehicle) GetAPIUsage() tesla.APIUsage {
+	return tesla.APIUsage{}
+}
+
 func (m *mockVehicle) getCalls() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -149,6 +157,12 @@ func (m *mockStore) Search(ctx context.Context, query string, from, to time.Time
 	return nil, nil
 }
 
+func (m *mockStore) InsertAPIUsage(ctx context.Context, s storage.APIUsageSnapshot) error {
+	return nil
+}
+func (m *mockStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
+	return nil, nil
+}
 func (m *mockStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (m *mockStore) Close() error                                                      { return nil }
 

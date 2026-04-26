@@ -12,7 +12,12 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("TESLA_CLIENT_ID", "test-client-id")
 	t.Setenv("TESLA_CLIENT_SECRET", "test-client-secret")
 	t.Setenv("TESLA_REFRESH_TOKEN", "test-refresh-token")
+	t.Setenv("TESLA_REDIRECT_URI", "https://tesla.bellee.net/auth/tesla/callback")
+	t.Setenv("TESLA_SCOPE", "openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds")
 	t.Setenv("TESLA_VIN", "5YJ3E1EA0RF000000")
+	t.Setenv("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
+	t.Setenv("OAUTH_STATE_HMAC_KEY", "test-hmac-key")
+	t.Setenv("TESLA_TOKEN_PATH", "/data/tesla-refresh-token")
 	t.Setenv("HTTP_AUTH_PASSWORD", "test-password")
 }
 
@@ -34,7 +39,10 @@ func Test_Load_missingSungrowHost(t *testing.T) {
 	t.Setenv("TESLA_CLIENT_ID", "id")
 	t.Setenv("TESLA_CLIENT_SECRET", "secret")
 	t.Setenv("TESLA_REFRESH_TOKEN", "token")
+	t.Setenv("TESLA_REDIRECT_URI", "https://tesla.bellee.net/auth/tesla/callback")
 	t.Setenv("TESLA_VIN", "vin")
+	t.Setenv("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
+	t.Setenv("OAUTH_STATE_HMAC_KEY", "test-hmac-key")
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for missing SUNGROW_HOST")
@@ -46,6 +54,9 @@ func Test_Load_missingTeslaVIN(t *testing.T) {
 	t.Setenv("TESLA_CLIENT_ID", "id")
 	t.Setenv("TESLA_CLIENT_SECRET", "secret")
 	t.Setenv("TESLA_REFRESH_TOKEN", "token")
+	t.Setenv("TESLA_REDIRECT_URI", "https://tesla.bellee.net/auth/tesla/callback")
+	t.Setenv("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
+	t.Setenv("OAUTH_STATE_HMAC_KEY", "test-hmac-key")
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for missing TESLA_VIN")
@@ -128,6 +139,15 @@ func Test_Load_defaultsApplied(t *testing.T) {
 	if cfg.AmpsChangeThreshold != 2 {
 		t.Errorf("AmpsChangeThreshold = %d, want 2", cfg.AmpsChangeThreshold)
 	}
+	if cfg.TLSEnabled {
+		t.Fatal("TLSEnabled = true, want false")
+	}
+	if cfg.TLSPort != 8443 {
+		t.Errorf("TLSPort = %d, want 8443", cfg.TLSPort)
+	}
+	if cfg.HTTPChallengePort != 8081 {
+		t.Errorf("HTTPChallengePort = %d, want 8081", cfg.HTTPChallengePort)
+	}
 }
 
 func Test_Load_logLevelDebug(t *testing.T) {
@@ -179,11 +199,57 @@ func Test_Load_missingHTTPAuthPassword(t *testing.T) {
 	t.Setenv("TESLA_CLIENT_ID", "test-client-id")
 	t.Setenv("TESLA_CLIENT_SECRET", "test-client-secret")
 	t.Setenv("TESLA_REFRESH_TOKEN", "test-refresh-token")
+	t.Setenv("TESLA_REDIRECT_URI", "https://tesla.bellee.net/auth/tesla/callback")
 	t.Setenv("TESLA_VIN", "5YJ3E1EA0RF000000")
+	t.Setenv("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
+	t.Setenv("OAUTH_STATE_HMAC_KEY", "test-hmac-key")
 
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for missing HTTP_AUTH_PASSWORD")
+	}
+}
+
+func Test_Load_missingTeslaRefreshTokenAllowed(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TESLA_REFRESH_TOKEN", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TeslaRefreshToken != "" {
+		t.Fatalf("TeslaRefreshToken = %q, want empty", cfg.TeslaRefreshToken)
+	}
+}
+
+func Test_Load_missingTeslaRedirectURI(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TESLA_REDIRECT_URI", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for missing TESLA_REDIRECT_URI")
+	}
+}
+
+func Test_Load_invalidTeslaRedirectURIScheme(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TESLA_REDIRECT_URI", "http://tesla.bellee.net/auth/tesla/callback")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for non-https non-local redirect URI")
+	}
+}
+
+func Test_Load_missingOAuthStateHMACKey(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OAUTH_STATE_HMAC_KEY", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for missing OAUTH_STATE_HMAC_KEY")
 	}
 }
 
@@ -275,5 +341,33 @@ func Test_Load_ampsChangeThresholdNegative(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for AMPS_CHANGE_THRESHOLD=-1")
+	}
+}
+
+func Test_Load_tlsEnabledRequiresDomain(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TLS_ENABLED", "true")
+	t.Setenv("TLS_DOMAIN", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for missing TLS_DOMAIN when TLS is enabled")
+	}
+}
+
+func Test_Load_tlsEnabledWithDomain(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("TLS_ENABLED", "true")
+	t.Setenv("TLS_DOMAIN", "tesla.bellee.net")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.TLSEnabled {
+		t.Fatal("TLSEnabled = false, want true")
+	}
+	if cfg.TLSDomain != "tesla.bellee.net" {
+		t.Fatalf("TLSDomain = %q, want %q", cfg.TLSDomain, "tesla.bellee.net")
 	}
 }

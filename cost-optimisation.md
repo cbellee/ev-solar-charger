@@ -20,7 +20,7 @@ Each account receives a **$10/month discount** for personal use.
 
 ## Problem
 
-The controller previously called `GetChargeState()` (which hits the `vehicle_data` endpoint) on every tick of the poll loop (default: every 10 seconds). This produced ~8,640 API calls per day, costing approximately **$17/day or $518/month** — far exceeding the free tier.
+The controller previously called `GetChargeState()` (which hits the `vehicle_data` endpoint) on every tick of the poll loop (default: every 10 seconds). This produced ~8,640 API calls per day, costing approximately **$17/day or $518/month** — far exceeding the $10/month personal discount.
 
 Sending `SetChargingAmps` on every 1A fluctuation also generated unnecessary command calls.
 

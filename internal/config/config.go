@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,8 +17,13 @@ type Config struct {
 	TeslaClientID             string
 	TeslaClientSecret         string
 	TeslaRefreshToken         string
+	TeslaRedirectURI          string
+	TeslaScope                string
 	TeslaVIN                  string
 	TeslaPrivateKeyPath       string
+	TeslaPublicKeyPEMPath     string
+	OAuthStateHMACKey         string
+	TeslaTokenPath            string
 	TeslaRegion               string
 	TeslaTestMode             bool
 	PollInterval              time.Duration
@@ -31,6 +37,11 @@ type Config struct {
 	AmpsChangeThreshold       int
 	HTTPHost                  string
 	HTTPPort                  int
+	TLSEnabled                bool
+	TLSDomain                 string
+	TLSCertDir                string
+	TLSPort                   int
+	HTTPChallengePort         int
 	HTTPAuthUser              string
 	HTTPAuthPassword          string
 	LogLevel                  slog.Level
@@ -63,7 +74,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TeslaPrivateKeyPath = envOrDefault("TESLA_PRIVATE_KEY_PATH", "/secrets/fleet-key.pem")
+	cfg.TeslaPublicKeyPEMPath = envOrDefault("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
+	cfg.OAuthStateHMACKey = envOrDefault("OAUTH_STATE_HMAC_KEY", "")
+	cfg.TeslaTokenPath = envOrDefault("TESLA_TOKEN_PATH", "/data/tesla-refresh-token")
 	cfg.TeslaRegion = envOrDefault("TESLA_REGION", "na")
+	cfg.TeslaRedirectURI = envOrDefault("TESLA_REDIRECT_URI", "")
+	cfg.TeslaScope = envOrDefault("TESLA_SCOPE", "openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds")
 
 	if !cfg.TeslaTestMode {
 		cfg.TeslaClientID, err = requireEnv("TESLA_CLIENT_ID")
@@ -76,14 +92,34 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 
-		cfg.TeslaRefreshToken, err = requireEnv("TESLA_REFRESH_TOKEN")
-		if err != nil {
-			return Config{}, err
-		}
+		cfg.TeslaRefreshToken = envOrDefault("TESLA_REFRESH_TOKEN", "")
 
 		cfg.TeslaVIN, err = requireEnv("TESLA_VIN")
 		if err != nil {
 			return Config{}, err
+		}
+
+		if strings.TrimSpace(cfg.TeslaRedirectURI) == "" {
+			return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI is required")
+		}
+
+		redirectURL, err := url.Parse(cfg.TeslaRedirectURI)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse TESLA_REDIRECT_URI: %w", err)
+		}
+		if redirectURL.Scheme == "" || redirectURL.Host == "" {
+			return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI must be an absolute URL")
+		}
+		if redirectURL.Scheme != "https" && !isLocalHTTP(redirectURL) {
+			return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI must use https unless it targets localhost")
+		}
+
+		if strings.TrimSpace(cfg.TeslaPublicKeyPEMPath) == "" {
+			return Config{}, fmt.Errorf("config: TESLA_PUBLIC_KEY_PEM_PATH is required")
+		}
+
+		if strings.TrimSpace(cfg.OAuthStateHMACKey) == "" {
+			return Config{}, fmt.Errorf("config: OAUTH_STATE_HMAC_KEY is required")
 		}
 	}
 
@@ -177,6 +213,35 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	cfg.TLSEnabled, err = envBool("TLS_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TLSDomain = envOrDefault("TLS_DOMAIN", "")
+	cfg.TLSCertDir = envOrDefault("TLS_CERT_DIR", "/data/autocert")
+	cfg.TLSPort, err = envInt("TLS_PORT", 8443)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := validatePort("TLS_PORT", cfg.TLSPort); err != nil {
+		return Config{}, err
+	}
+	cfg.HTTPChallengePort, err = envInt("HTTP_CHALLENGE_PORT", 8081)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := validatePort("HTTP_CHALLENGE_PORT", cfg.HTTPChallengePort); err != nil {
+		return Config{}, err
+	}
+	if cfg.TLSEnabled {
+		if strings.TrimSpace(cfg.TLSDomain) == "" {
+			return Config{}, fmt.Errorf("config: TLS_DOMAIN is required when TLS_ENABLED=true")
+		}
+		if strings.TrimSpace(cfg.TLSCertDir) == "" {
+			return Config{}, fmt.Errorf("config: TLS_CERT_DIR is required when TLS_ENABLED=true")
+		}
+	}
+
 	cfg.HTTPAuthUser = envOrDefault("HTTP_AUTH_USER", "admin")
 	cfg.HTTPAuthPassword, err = requireEnv("HTTP_AUTH_PASSWORD")
 	if err != nil {
@@ -260,4 +325,9 @@ func parseLogLevel(s string) (slog.Level, error) {
 	default:
 		return 0, fmt.Errorf("config: invalid LOG_LEVEL %q, must be debug, info, warn, or error", s)
 	}
+}
+
+func isLocalHTTP(parsedURL *url.URL) bool {
+	host := strings.ToLower(parsedURL.Hostname())
+	return parsedURL.Scheme == "http" && (host == "localhost" || host == "127.0.0.1")
 }

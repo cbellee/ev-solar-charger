@@ -613,6 +613,20 @@ func (c *Controller) flushMinuteAverage(ctx context.Context) {
 	if err := c.store.InsertReading(ctx, reading); err != nil {
 		c.logger.ErrorContext(ctx, "failed to persist reading", "error", err)
 	}
+
+	// Persist API usage snapshot for historical analysis.
+	usage := c.vehicle.GetAPIUsage()
+	usageSnap := storage.APIUsageSnapshot{
+		Timestamp:     minute,
+		DataCalls:     usage.DataCalls,
+		CommandCalls:  usage.CommandCalls,
+		WakeCalls:     usage.WakeCalls,
+		StreamSignals: usage.StreamSignals,
+		EstimatedCost: usage.EstimatedCost,
+	}
+	if err := c.store.InsertAPIUsage(ctx, usageSnap); err != nil {
+		c.logger.ErrorContext(ctx, "failed to persist api usage", "error", err)
+	}
 }
 
 // SetMode changes the operating mode.
@@ -670,4 +684,9 @@ func (c *Controller) GetStateSnapshot() StateSnapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.snapshot
+}
+
+// GetAPIUsage returns the current Tesla API usage stats.
+func (c *Controller) GetAPIUsage() tesla.APIUsage {
+	return c.vehicle.GetAPIUsage()
 }

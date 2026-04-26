@@ -28,3 +28,11 @@ func (testModeController) StopCharging(ctx context.Context) error {
 func (testModeController) WakeUp(ctx context.Context) error {
 	return ErrCommandsDisabled
 }
+
+func (testModeController) SetRefreshToken(ctx context.Context, refreshToken string) error {
+	return nil
+}
+
+func (testModeController) GetAPIUsage() APIUsage {
+	return APIUsage{}
+}

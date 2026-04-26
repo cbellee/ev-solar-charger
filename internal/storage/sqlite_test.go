@@ -448,3 +448,113 @@ func Test_Close_operationsReturnError(t *testing.T) {
 		t.Error("expected error after close")
 	}
 }
+
+func Test_InsertAPIUsage_queryAPIUsage(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Minute)
+
+	for i := 0; i < 5; i++ {
+		snap := APIUsageSnapshot{
+			Timestamp:     now.Add(time.Duration(i) * time.Minute),
+			DataCalls:     int64(10 * (i + 1)),
+			CommandCalls:  int64(5 * (i + 1)),
+			WakeCalls:     int64(i),
+			StreamSignals: 0,
+			EstimatedCost: float64(i) * 0.01,
+		}
+		if err := store.InsertAPIUsage(ctx, snap); err != nil {
+			t.Fatalf("insert %d failed: %v", i, err)
+		}
+	}
+
+	snapshots, err := store.QueryAPIUsage(ctx, now.Add(-time.Minute), now.Add(6*time.Minute), 100)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if len(snapshots) != 5 {
+		t.Fatalf("got %d snapshots, want 5", len(snapshots))
+	}
+	// Results are ordered DESC, so first result is the latest.
+	if snapshots[0].DataCalls != 50 {
+		t.Errorf("latest DataCalls = %d, want 50", snapshots[0].DataCalls)
+	}
+	if snapshots[0].CommandCalls != 25 {
+		t.Errorf("latest CommandCalls = %d, want 25", snapshots[0].CommandCalls)
+	}
+}
+
+func Test_QueryAPIUsage_emptyRange(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	snapshots, err := store.QueryAPIUsage(ctx,
+		time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2099, 1, 2, 0, 0, 0, 0, time.UTC), 100)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if snapshots == nil {
+		t.Error("expected empty slice, got nil")
+	}
+	if len(snapshots) != 0 {
+		t.Errorf("got %d snapshots, want 0", len(snapshots))
+	}
+}
+
+func Test_QueryAPIUsage_respectsLimit(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Minute)
+
+	for i := 0; i < 20; i++ {
+		snap := APIUsageSnapshot{
+			Timestamp: now.Add(time.Duration(i) * time.Minute),
+			DataCalls: int64(i),
+		}
+		if err := store.InsertAPIUsage(ctx, snap); err != nil {
+			t.Fatalf("insert %d failed: %v", i, err)
+		}
+	}
+
+	snapshots, err := store.QueryAPIUsage(ctx, now.Add(-time.Minute), now.Add(21*time.Minute), 5)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if len(snapshots) != 5 {
+		t.Errorf("got %d snapshots, want 5 (limit)", len(snapshots))
+	}
+}
+
+func Test_Prune_deletesAPIUsageSnapshots(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	old := now.Add(-2 * 365 * 24 * time.Hour)
+
+	if err := store.InsertAPIUsage(ctx, APIUsageSnapshot{Timestamp: old, DataCalls: 100}); err != nil {
+		t.Fatalf("insert old usage: %v", err)
+	}
+	if err := store.InsertAPIUsage(ctx, APIUsageSnapshot{Timestamp: now, DataCalls: 200}); err != nil {
+		t.Fatalf("insert new usage: %v", err)
+	}
+
+	count, err := store.Prune(ctx, 365*24*time.Hour)
+	if err != nil {
+		t.Fatalf("prune failed: %v", err)
+	}
+	if count < 1 {
+		t.Errorf("prune deleted %d rows, want >= 1", count)
+	}
+
+	snapshots, err := store.QueryAPIUsage(ctx, now.Add(-time.Hour), now.Add(time.Hour), 100)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Errorf("got %d snapshots after prune, want 1", len(snapshots))
+	}
+	if snapshots[0].DataCalls != 200 {
+		t.Errorf("remaining DataCalls = %d, want 200", snapshots[0].DataCalls)
+	}
+}

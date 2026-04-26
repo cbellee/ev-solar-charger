@@ -39,6 +39,17 @@ type Event struct {
 	Details   string
 }
 
+// APIUsageSnapshot records a point-in-time snapshot of Tesla API usage counters.
+type APIUsageSnapshot struct {
+	ID            int64
+	Timestamp     time.Time
+	DataCalls     int64
+	CommandCalls  int64
+	WakeCalls     int64
+	StreamSignals int64
+	EstimatedCost float64
+}
+
 // ReadingFilter for querying historical readings.
 type ReadingFilter struct {
 	From     time.Time
@@ -59,6 +70,8 @@ type Store interface {
 	InsertEvent(ctx context.Context, e Event) error
 	QueryEvents(ctx context.Context, from, to time.Time, eventType string, limit, offset int) ([]Event, error)
 	Search(ctx context.Context, query string, from, to time.Time, limit int) ([]Event, error)
+	InsertAPIUsage(ctx context.Context, s APIUsageSnapshot) error
+	QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]APIUsageSnapshot, error)
 	Prune(ctx context.Context, olderThan time.Duration) (int64, error)
 	Close() error
 }

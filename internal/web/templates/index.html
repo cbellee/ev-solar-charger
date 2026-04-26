@@ -128,6 +128,58 @@
             </div>
         </div>
 
+        <!-- Tesla API Usage -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <h2 class="text-lg font-semibold mb-3 text-purple-400">Tesla API Usage (Monthly)</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                <div class="bg-gray-750 rounded p-3 text-center">
+                    <div class="text-xs text-gray-400 mb-1">Data Calls</div>
+                    <div class="text-lg font-mono font-bold" id="usageData">--</div>
+                    <div class="text-xs text-gray-500">$<span id="usageDataCost">0.00</span></div>
+                    <div class="w-full bg-gray-700 rounded-full h-1.5 mt-1">
+                        <div id="usageDataBar" class="bg-blue-500 h-1.5 rounded-full" style="width:0%"></div>
+                    </div>
+                </div>
+                <div class="bg-gray-750 rounded p-3 text-center">
+                    <div class="text-xs text-gray-400 mb-1">Commands</div>
+                    <div class="text-lg font-mono font-bold" id="usageCommands">--</div>
+                    <div class="text-xs text-gray-500">$<span id="usageCommandsCost">0.00</span></div>
+                    <div class="w-full bg-gray-700 rounded-full h-1.5 mt-1">
+                        <div id="usageCommandsBar" class="bg-green-500 h-1.5 rounded-full" style="width:0%"></div>
+                    </div>
+                </div>
+                <div class="bg-gray-750 rounded p-3 text-center">
+                    <div class="text-xs text-gray-400 mb-1">Wakes</div>
+                    <div class="text-lg font-mono font-bold" id="usageWakes">--</div>
+                    <div class="text-xs text-gray-500">$<span id="usageWakesCost">0.00</span></div>
+                    <div class="w-full bg-gray-700 rounded-full h-1.5 mt-1">
+                        <div id="usageWakesBar" class="bg-yellow-500 h-1.5 rounded-full" style="width:0%"></div>
+                    </div>
+                </div>
+                <div class="bg-gray-750 rounded p-3 text-center">
+                    <div class="text-xs text-gray-400 mb-1">Stream Signals</div>
+                    <div class="text-lg font-mono font-bold" id="usageStream">--</div>
+                    <div class="text-xs text-gray-500">$<span id="usageStreamCost">0.00</span></div>
+                    <div class="w-full bg-gray-700 rounded-full h-1.5 mt-1">
+                        <div id="usageStreamBar" class="bg-purple-500 h-1.5 rounded-full" style="width:0%"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="flex justify-between items-center text-sm">
+                <div>
+                    <span class="text-gray-400">Estimated cost:</span>
+                    <span id="usageCost" class="font-mono font-bold">$0.00</span>
+                    <span class="text-gray-500 mx-1">-</span>
+                    <span class="text-gray-400">$10.00 discount</span>
+                    <span class="text-gray-500 mx-1">=</span>
+                    <span id="usageNet" class="font-mono font-bold text-green-400">$0.00</span>
+                </div>
+                <div class="text-xs text-gray-500">
+                    Billing month: <span id="usageMonth">--</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Controls -->
         <div class="bg-gray-800 rounded-lg p-4 mb-6">
             <h2 class="text-lg font-semibold mb-3">Controls</h2>
@@ -310,6 +362,57 @@
 
         // Initial state fetch.
         fetch('/api/state').then(r => r.json()).then(updateDashboard).catch(() => {});
+
+        // API usage polling (every 60 seconds).
+        function updateAPIUsage() {
+            fetch('/api/usage').then(r => r.json()).then(d => {
+                document.getElementById('usageData').textContent = d.dataCalls.toLocaleString();
+                document.getElementById('usageDataCost').textContent = d.dataCost.toFixed(2);
+                document.getElementById('usageCommands').textContent = d.commandCalls.toLocaleString();
+                document.getElementById('usageCommandsCost').textContent = d.commandCost.toFixed(2);
+                document.getElementById('usageWakes').textContent = d.wakeCalls.toLocaleString();
+                document.getElementById('usageWakesCost').textContent = d.wakeCost.toFixed(2);
+                document.getElementById('usageStream').textContent = d.streamSignals.toLocaleString();
+                document.getElementById('usageStreamCost').textContent = d.streamCost.toFixed(4);
+
+                // Progress bars show each category's cost as % of the shared $10 budget.
+                const budget = d.monthlyDiscount;
+                const pctData = budget > 0 ? Math.min(100, (d.dataCost / budget) * 100) : 0;
+                const pctCmd = budget > 0 ? Math.min(100, (d.commandCost / budget) * 100) : 0;
+                const pctWake = budget > 0 ? Math.min(100, (d.wakeCost / budget) * 100) : 0;
+                const pctStream = budget > 0 ? Math.min(100, (d.streamCost / budget) * 100) : 0;
+
+                document.getElementById('usageDataBar').style.width = pctData + '%';
+                document.getElementById('usageCommandsBar').style.width = pctCmd + '%';
+                document.getElementById('usageWakesBar').style.width = pctWake + '%';
+                document.getElementById('usageStreamBar').style.width = pctStream + '%';
+
+                // Color bars yellow at 80% of budget, red at 100%.
+                setBarColor('usageDataBar', pctData);
+                setBarColor('usageCommandsBar', pctCmd);
+                setBarColor('usageWakesBar', pctWake);
+                setBarColor('usageStreamBar', pctStream);
+
+                document.getElementById('usageCost').textContent = '$' + d.estimatedCost.toFixed(2);
+                const netEl = document.getElementById('usageNet');
+                netEl.textContent = '$' + d.netCost.toFixed(2);
+                netEl.className = d.netCost > 0 ? 'font-mono font-bold text-red-400' : 'font-mono font-bold text-green-400';
+                document.getElementById('usageMonth').textContent = d.monthStarted;
+            }).catch(() => {});
+        }
+
+        function setBarColor(id, pct) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            if (pct >= 100) {
+                el.className = el.className.replace(/bg-\w+-500/, 'bg-red-500');
+            } else if (pct >= 80) {
+                el.className = el.className.replace(/bg-\w+-500/, 'bg-yellow-500');
+            }
+        }
+
+        updateAPIUsage();
+        setInterval(updateAPIUsage, 60000);
 
         function updatePowerFlow(d) {
             const pv = d.pvWatts || 0;

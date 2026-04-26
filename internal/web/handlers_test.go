@@ -54,6 +54,12 @@ func (s *recordingStore) Search(ctx context.Context, query string, from, to time
 	s.searchLimit = limit
 	return s.events, s.searchErr
 }
+func (s *recordingStore) InsertAPIUsage(ctx context.Context, snap storage.APIUsageSnapshot) error {
+	return nil
+}
+func (s *recordingStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
+	return []storage.APIUsageSnapshot{}, nil
+}
 func (s *recordingStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) {
 	return 0, nil
 }
@@ -87,6 +93,10 @@ func (n *nullVehicle) SetChargingAmps(ctx context.Context, amps int) error { ret
 func (n *nullVehicle) StartCharging(ctx context.Context) error             { return nil }
 func (n *nullVehicle) StopCharging(ctx context.Context) error              { return nil }
 func (n *nullVehicle) WakeUp(ctx context.Context) error                    { return nil }
+func (n *nullVehicle) SetRefreshToken(ctx context.Context, refreshToken string) error {
+	return nil
+}
+func (n *nullVehicle) GetAPIUsage() tesla.APIUsage { return tesla.APIUsage{} }
 
 func newTestCtrl(t *testing.T) *controller.Controller {
 	t.Helper()
@@ -502,5 +512,67 @@ func (s *nullStore) QueryEvents(ctx context.Context, from, to time.Time, eventTy
 func (s *nullStore) Search(ctx context.Context, query string, from, to time.Time, limit int) ([]storage.Event, error) {
 	return []storage.Event{}, nil
 }
+func (s *nullStore) InsertAPIUsage(ctx context.Context, snap storage.APIUsageSnapshot) error {
+	return nil
+}
+func (s *nullStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
+	return []storage.APIUsageSnapshot{}, nil
+}
 func (s *nullStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (s *nullStore) Close() error                                                      { return nil }
+
+func Test_handleAPIUsage_returnsUsageData(t *testing.T) {
+	ctrl := newTestCtrl(t)
+	handler := handleAPIUsage(ctrl)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/usage", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp apiUsageResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.DataCost != 0 {
+		t.Errorf("DataCost = %f, want 0", resp.DataCost)
+	}
+	if resp.CommandCost != 0 {
+		t.Errorf("CommandCost = %f, want 0", resp.CommandCost)
+	}
+	if resp.WakeCost != 0 {
+		t.Errorf("WakeCost = %f, want 0", resp.WakeCost)
+	}
+	if resp.StreamCost != 0 {
+		t.Errorf("StreamCost = %f, want 0", resp.StreamCost)
+	}
+	if resp.MonthlyDiscount != 10.0 {
+		t.Errorf("MonthlyDiscount = %f, want 10.0", resp.MonthlyDiscount)
+	}
+	if resp.NetCost != 0 {
+		t.Errorf("NetCost = %f, want 0 (under free tier)", resp.NetCost)
+	}
+}
+
+func Test_handleAPIUsageHistory_returnsSnapshots(t *testing.T) {
+	handler := handleAPIUsageHistory(&nullStore{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/usage/history", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var snapshots []storage.APIUsageSnapshot
+	if err := json.NewDecoder(w.Body).Decode(&snapshots); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(snapshots) != 0 {
+		t.Errorf("got %d snapshots, want 0", len(snapshots))
+	}
+}
