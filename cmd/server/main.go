@@ -16,6 +16,10 @@ import (
 	"syscall"
 	"time"
 
+	// Embed the IANA timezone database so distroless images can resolve
+	// zones like Australia/Sydney without /usr/share/zoneinfo.
+	_ "time/tzdata"
+
 	"github.com/cbellee/ev-solar-charger/internal/config"
 	"github.com/cbellee/ev-solar-charger/internal/controller"
 	"github.com/cbellee/ev-solar-charger/internal/inverter"

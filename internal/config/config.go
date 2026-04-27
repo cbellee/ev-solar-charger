@@ -32,6 +32,11 @@ type Config struct {
 	LineVoltage               int
 	DeadbandPolls             int
 	WakeThresholdPolls        int
+	WakeRetryInterval         time.Duration
+	WakeAllowedStartHour      int
+	WakeAllowedEndHour        int
+	WakeTimezone              *time.Location
+	PluggedInStaleAfter       time.Duration
 	TeslaChargingPollInterval time.Duration
 	TeslaIdlePollInterval     time.Duration
 	AmpsChangeThreshold       int
@@ -177,6 +182,50 @@ func Load() (Config, error) {
 	if cfg.WakeThresholdPolls < 1 {
 		return Config{}, fmt.Errorf("config: WAKE_THRESHOLD_POLLS must be >= 1, got %d", cfg.WakeThresholdPolls)
 	}
+
+	wakeRetrySec, err := envInt("WAKE_RETRY_INTERVAL_SECONDS", 300)
+	if err != nil {
+		return Config{}, err
+	}
+	if wakeRetrySec < 1 {
+		return Config{}, fmt.Errorf("config: WAKE_RETRY_INTERVAL_SECONDS must be >= 1, got %d", wakeRetrySec)
+	}
+	cfg.WakeRetryInterval = time.Duration(wakeRetrySec) * time.Second
+
+	plugStaleSec, err := envInt("PLUGGED_IN_STALE_AFTER_SECONDS", 86400)
+	if err != nil {
+		return Config{}, err
+	}
+	if plugStaleSec < 1 {
+		return Config{}, fmt.Errorf("config: PLUGGED_IN_STALE_AFTER_SECONDS must be >= 1, got %d", plugStaleSec)
+	}
+	cfg.PluggedInStaleAfter = time.Duration(plugStaleSec) * time.Second
+
+	cfg.WakeAllowedStartHour, err = envInt("WAKE_ALLOWED_START_HOUR", 8)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.WakeAllowedStartHour < 0 || cfg.WakeAllowedStartHour > 23 {
+		return Config{}, fmt.Errorf("config: WAKE_ALLOWED_START_HOUR must be in [0,23], got %d", cfg.WakeAllowedStartHour)
+	}
+
+	cfg.WakeAllowedEndHour, err = envInt("WAKE_ALLOWED_END_HOUR", 19)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.WakeAllowedEndHour < 1 || cfg.WakeAllowedEndHour > 24 {
+		return Config{}, fmt.Errorf("config: WAKE_ALLOWED_END_HOUR must be in [1,24], got %d", cfg.WakeAllowedEndHour)
+	}
+	if cfg.WakeAllowedEndHour <= cfg.WakeAllowedStartHour {
+		return Config{}, fmt.Errorf("config: WAKE_ALLOWED_END_HOUR (%d) must be greater than WAKE_ALLOWED_START_HOUR (%d)", cfg.WakeAllowedEndHour, cfg.WakeAllowedStartHour)
+	}
+
+	tzName := envOrDefault("WAKE_TIMEZONE", "Australia/Sydney")
+	loc, err := time.LoadLocation(tzName)
+	if err != nil {
+		return Config{}, fmt.Errorf("config: WAKE_TIMEZONE %q is invalid: %w", tzName, err)
+	}
+	cfg.WakeTimezone = loc
 
 	teslaChargingSec, err := envInt("TESLA_CHARGING_POLL_SECONDS", 60)
 	if err != nil {

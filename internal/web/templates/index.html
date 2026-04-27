@@ -433,8 +433,13 @@
             const gridDir = document.getElementById('flowGridDirection');
             gridDir.textContent = grid < 0 ? 'Exporting' : grid > 0 ? 'Importing' : 'Grid';
 
+            const pluggedIn = !!d.carPluggedIn;
             const evLabel = document.getElementById('flowEvLabel');
-            evLabel.textContent = charging ? d.targetAmps + ' A' : (surplus > 0 ? formatPower(surplus) : 'Idle');
+            if (!pluggedIn) {
+                evLabel.textContent = 'Unplugged';
+            } else {
+                evLabel.textContent = charging ? d.targetAmps + ' A' : (surplus > 0 ? formatPower(surplus) : 'Idle');
+            }
 
             // Show/hide flow dots and paths based on actual power flow.
             const hasPv = pv > 50;
@@ -448,8 +453,8 @@
             setFlowVisible('useDotSG', 'pathSG', hasPv && isExporting);
             // Grid → House (importing).
             setFlowVisible('useDotGH', 'pathGH', isImporting);
-            // House → EV (charging or surplus available).
-            setFlowVisible('useDotHE', 'pathHE', charging || surplus > 50);
+            // House → EV (only when plugged in AND charging or surplus available).
+            setFlowVisible('useDotHE', 'pathHE', pluggedIn && (charging || surplus > 50));
         }
 
         function setFlowVisible(dotId, pathId, visible) {

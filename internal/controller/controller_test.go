@@ -174,6 +174,11 @@ func defaultCfg() config.Config {
 		LineVoltage:               240,
 		DeadbandPolls:             3,
 		WakeThresholdPolls:        6,
+		WakeRetryInterval:         5 * time.Minute,
+		WakeAllowedStartHour:      0,
+		WakeAllowedEndHour:        24,
+		WakeTimezone:              time.UTC,
+		PluggedInStaleAfter:       24 * time.Hour,
 		TeslaChargingPollInterval: 0, // poll every tick in tests
 		TeslaIdlePollInterval:     0, // poll every tick in tests
 		AmpsChangeThreshold:       0, // no hysteresis in legacy tests
@@ -743,17 +748,29 @@ func Test_shouldPollTesla_idleWithSurplusPolls(t *testing.T) {
 	}
 }
 
-func Test_shouldPollTesla_wakePendingSkipsPoll(t *testing.T) {
+func Test_shouldPollTesla_wakePendingThrottle(t *testing.T) {
 	cfg := defaultCfg()
+	cfg.WakeRetryInterval = 5 * time.Minute
 	ctrl := newTestControllerWithConfig(&mockInverter{}, &mockVehicle{}, &mockStore{}, cfg)
 	ctrl.mu.Lock()
 	ctrl.state = StateWakePending
 	ctrl.hasCachedState = true
-	ctrl.lastTeslaPoll = time.Now().Add(-10 * time.Minute)
 	ctrl.mu.Unlock()
 
+	// Recent poll: should not poll again yet.
+	ctrl.mu.Lock()
+	ctrl.lastTeslaPoll = time.Now().Add(-30 * time.Second)
+	ctrl.mu.Unlock()
 	if ctrl.shouldPollTesla(5000) {
-		t.Error("shouldPollTesla = true in wake_pending, want false")
+		t.Error("shouldPollTesla = true in wake_pending shortly after poll, want false")
+	}
+
+	// Old poll: should poll again to detect car coming online.
+	ctrl.mu.Lock()
+	ctrl.lastTeslaPoll = time.Now().Add(-10 * time.Minute)
+	ctrl.mu.Unlock()
+	if !ctrl.shouldPollTesla(5000) {
+		t.Error("shouldPollTesla = false in wake_pending after retry interval, want true")
 	}
 }
 

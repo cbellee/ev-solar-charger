@@ -76,6 +76,7 @@ type Controller struct {
 	consecutiveSurplus int
 	lastChargeAmps     int
 	lastKnownPluggedIn bool
+	lastOnlineAt       time.Time
 
 	accumulator     []accSample
 	currentMinute   time.Time
@@ -86,6 +87,7 @@ type Controller struct {
 	sessionSamples  int
 
 	lastTeslaPoll     time.Time
+	lastWakeAttempt   time.Time
 	cachedChargeState tesla.ChargeState
 	hasCachedState    bool
 
@@ -240,10 +242,22 @@ func (c *Controller) Tick(ctx context.Context) {
 
 		if !chargeState.IsOnline {
 			if surplus >= c.cfg.WakeThresholdPolls {
-				c.transitionTo(ctx, StateWakePending, "waking car")
-				if err := c.vehicle.WakeUp(ctx); err != nil {
-					c.logger.WarnContext(ctx, "wake failed", "error", err)
-					c.transitionTo(ctx, StateError, err.Error())
+				c.mu.RLock()
+				lastWake := c.lastWakeAttempt
+				c.mu.RUnlock()
+				if !lastWake.IsZero() && time.Since(lastWake) < c.cfg.WakeRetryInterval {
+					// Wake already attempted recently; stay in WakePending and
+					// wait for the car to come online without spamming the API.
+					c.transitionTo(ctx, StateWakePending, "waiting for car to wake")
+				} else {
+					c.transitionTo(ctx, StateWakePending, "waking car")
+					if err := c.vehicle.WakeUp(ctx); err != nil {
+						c.logger.WarnContext(ctx, "wake failed", "error", err)
+						c.transitionTo(ctx, StateError, err.Error())
+					}
+					c.mu.Lock()
+					c.lastWakeAttempt = time.Now()
+					c.mu.Unlock()
 				}
 			} else {
 				c.transitionTo(ctx, StateMonitoring, "surplus detected, waiting to wake")
@@ -429,13 +443,39 @@ func (c *Controller) updateKnownPlugState(cs tesla.ChargeState) {
 	}
 	c.mu.Lock()
 	c.lastKnownPluggedIn = cs.PluggedIn
+	c.lastOnlineAt = time.Now()
 	c.mu.Unlock()
 }
 
 func (c *Controller) shouldAttemptWake() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.lastKnownPluggedIn
+	if !c.lastKnownPluggedIn {
+		return false
+	}
+	// Treat plug state as unknown if we haven't seen the car online recently.
+	// Without this, a car driven away while last-seen plugged in would trigger
+	// wake attempts indefinitely.
+	if c.cfg.PluggedInStaleAfter > 0 && !c.lastOnlineAt.IsZero() &&
+		time.Since(c.lastOnlineAt) > c.cfg.PluggedInStaleAfter {
+		return false
+	}
+	// Don't wake the car outside the allowed daytime window.
+	if !c.wakeWindowOpenLocked(time.Now()) {
+		return false
+	}
+	return true
+}
+
+// wakeWindowOpenLocked returns true if the local hour is within the configured
+// wake window. Caller must hold c.mu (read or write).
+func (c *Controller) wakeWindowOpenLocked(now time.Time) bool {
+	loc := c.cfg.WakeTimezone
+	if loc == nil {
+		loc = time.Local
+	}
+	hour := now.In(loc).Hour()
+	return hour >= c.cfg.WakeAllowedStartHour && hour < c.cfg.WakeAllowedEndHour
 }
 
 // shouldPollTesla decides whether to make a fresh Tesla API call this tick.
@@ -458,7 +498,9 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 	case StateCharging:
 		return now.Sub(lastPoll) >= c.cfg.TeslaChargingPollInterval
 	case StateWakePending:
-		return false
+		// Re-poll periodically to detect when the car comes online after a
+		// wake. Without this, the controller would stay stuck on cached state.
+		return now.Sub(lastPoll) >= c.cfg.WakeRetryInterval
 	default:
 		surplusAmps := int(math.Floor(surplusWatts / float64(c.cfg.LineVoltage)))
 		if surplusAmps >= c.cfg.MinChargeAmps {
