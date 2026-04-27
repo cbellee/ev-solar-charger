@@ -1,4 +1,488 @@
-# Solar EV Charger Controller
+# EV Solar Charger — Setup Instructions
+
+End-to-end guide for running this app on a Synology DSM 7.1.1 NAS, fronted by DSM's nginx with a Let's Encrypt cert, and integrated with the Tesla Fleet API. Includes architecture overview, configuration reference, and operations playbook.
+
+---
+
+## Table of Contents
+
+**Part A — Deployment**
+1. [Prerequisites](#prerequisites)
+2. [Tesla Fleet API — One-Time Setup](#1-tesla-fleet-api--one-time-setup)
+3. [Network — DNS, Router, DSM Ports](#2-network--dns-router-dsm-ports)
+4. [DSM — Let's Encrypt Cert](#3-dsm--lets-encrypt-cert)
+5. [DSM — Reverse Proxy Rule](#4-dsm--reverse-proxy-rule)
+6. [NAS — Project Files](#5-nas--project-files)
+7. [Start the Container](#6-start-the-container)
+8. [Tesla Partner Registration & OAuth Bootstrap](#7-tesla-fleet-api--partner-registration--oauth-bootstrap)
+9. [Operations](#8-operations)
+10. [Troubleshooting](#9-troubleshooting)
+11. [Security Notes](#10-security-notes)
+
+**Part B — Reference**
+
+12. [System Overview](#system-overview)
+13. [Control Loop](#control-loop)
+14. [Sungrow API Connection](#sungrow-api-connection)
+15. [Tesla Fleet API Connection](#tesla-fleet-api-connection)
+16. [Web Dashboard & API Endpoints](#web-dashboard)
+17. [Configuration Reference](#configuration-reference)
+18. [Outstanding Tasks](#outstanding-tasks)
+
+---
+
+# Part A — Deployment
+
+## Prerequisites
+
+- Synology NAS with DSM 7.1.1+, Container Manager (Docker) and `docker-compose` v1.28+ installed
+- A public domain (e.g. `ev.bellee.net`) with DNS you control (Cloudflare in this guide)
+- A router with port forwarding (MikroTik RouterOS in this guide)
+- A Tesla developer account with a registered Fleet API application
+- A Tesla vehicle with Fleet API support (post-2021 generally; check Tesla docs)
+- A Sungrow inverter on the same LAN as the NAS (Modbus TCP enabled)
+- SSH access to the NAS
+
+---
+
+## 1. Tesla Fleet API — One-Time Setup
+
+### 1.1 Create the developer app
+
+In <https://developer.tesla.com>:
+
+1. Create an app named (e.g.) `EV Solar Charger`
+2. Set **Allowed Origin(s)**: `https://ev.bellee.net`
+3. Set **Allowed Redirect URI(s)**: `https://ev.bellee.net/auth/tesla/callback`
+4. Set **Allowed Returned URL(s)**: `https://ev.bellee.net`
+5. **API and Scopes → Fleet API**, enable:
+   - Vehicle Information
+   - Vehicle Commands
+   - Vehicle Charging Management
+6. Note the **Client ID** and **Client Secret** — you'll need them later
+
+> Tesla rejects domain names that contain the substring `tesla`.
+
+### 1.2 Generate the Tesla keypair
+
+The Fleet API requires a `prime256v1` (P-256) keypair. Tesla fetches your public key from `https://<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem`.
+
+```bash
+cd /Users/<you>/Documents/repos/github.com/cbellee/ev-solar-charger
+./scripts/generate-tesla-key.sh
+```
+
+This produces `secrets/fleet-key.pem` (private, `chmod 600`) and `secrets/com.tesla.3p.public-key.pem` (public). The `secrets/` folder is git-ignored.
+
+Optional environment variables:
+- `SECRETS_DIR` — write keys to a different directory (default `./secrets`)
+- `FORCE=1` — overwrite existing key files
+
+If a private key was ever leaked, regenerate with `FORCE=1`, redeploy, re-verify the domain, and re-pair the vehicle via `https://tesla.com/_ak/<your-domain>`.
+
+### 1.3 Generate an OAuth state HMAC key
+
+```bash
+openssl rand -hex 32
+```
+
+Keep the output for `OAUTH_STATE_HMAC_KEY` in `.env`.
+
+---
+
+## 2. Network — DNS, Router, DSM Ports
+
+### 2.1 Move DSM web ports off 80/443
+
+DSM nginx hardcodes ports 80/443 and **cannot release them**. We'll reverse-proxy through it instead. First move DSM's own admin UI:
+
+- **Control Panel → Login Portal → DSM**
+  - HTTP port: `5000`
+  - HTTPS port: `5001`
+
+DSM nginx now keeps 80/443 free for our reverse-proxy rule (created in step 4).
+
+### 2.2 DNS — Cloudflare record
+
+Point `ev.bellee.net` at your home network, **DNS-only** (grey cloud). Tesla's HTTP-01 challenge for cert issuance must reach your NAS directly, so don't proxy through Cloudflare.
+
+Two options:
+
+**Option A — A record (static or rarely-changing public IP)**
+
+```
+Type: A
+Name: ev
+Content: <your public IP>
+Proxy: DNS only (grey cloud)
+TTL: Auto
+```
+
+**Option B — CNAME to MikroTik DDNS (recommended for dynamic IPs)**
+
+If your ISP assigns a dynamic public IP, point at the MikroTik's per-device DDNS hostname so it tracks IP changes automatically:
+
+```
+Type: CNAME
+Name: ev
+Content: <serial>.sn.mynetname.net      # from RouterOS: /ip cloud print
+Proxy: DNS only (grey cloud)
+TTL: Auto
+```
+
+Enable DDNS on the MikroTik first if you haven't:
+
+```routeros
+/ip cloud set ddns-enabled=yes
+/ip cloud print     # shows your <serial>.sn.mynetname.net hostname
+```
+
+After changing DNS, verify it resolves to your current public IP:
+
+```bash
+dig +short ev.bellee.net
+```
+
+### 2.3 MikroTik — disable internal www service
+
+If RouterOS is answering port 80 with the admin login page, Let's Encrypt will fail validation:
+
+```routeros
+/ip service disable www
+```
+
+### 2.4 MikroTik — port forward 80/443 to NAS
+
+Replace `192.168.88.167` with your actual NAS LAN IP:
+
+```routeros
+/ip firewall nat add chain=dstnat in-interface-list=WAN protocol=tcp dst-port=443 \
+    action=dst-nat to-addresses=192.168.88.167 to-ports=443 comment="ev.bellee.net 443"
+/ip firewall nat add chain=dstnat in-interface-list=WAN protocol=tcp dst-port=80  \
+    action=dst-nat to-addresses=192.168.88.167 to-ports=80  comment="ev.bellee.net 80"
+```
+
+### 2.5 (Optional) MikroTik hairpin NAT for LAN testing
+
+So you can hit `https://ev.bellee.net` from a LAN client (e.g. your Mac):
+
+```routeros
+/ip firewall nat add chain=dstnat src-address=192.168.88.0/24 dst-address=<public-ip> protocol=tcp dst-port=443 \
+    action=dst-nat to-addresses=192.168.88.167 to-ports=443 comment="hairpin 443"
+/ip firewall nat add chain=dstnat src-address=192.168.88.0/24 dst-address=<public-ip> protocol=tcp dst-port=80  \
+    action=dst-nat to-addresses=192.168.88.167 to-ports=80  comment="hairpin 80"
+/ip firewall nat add chain=srcnat src-address=192.168.88.0/24 dst-address=192.168.88.167 protocol=tcp dst-port=443 \
+    action=masquerade comment="hairpin masquerade 443"
+/ip firewall nat add chain=srcnat src-address=192.168.88.0/24 dst-address=192.168.88.167 protocol=tcp dst-port=80  \
+    action=masquerade comment="hairpin masquerade 80"
+```
+
+---
+
+## 3. DSM — Let's Encrypt Cert
+
+**Control Panel → Security → Certificate → Add → Add a new certificate → Get a certificate from Let's Encrypt**
+
+- Domain name: `ev.bellee.net`
+- Email: your address
+- Subject Alternative Name: leave blank
+
+DSM serves the HTTP-01 challenge from port 80 directly. The cert is renewed automatically.
+
+If validation fails: re-check that port 80 reaches the NAS (DNS, MikroTik forward, MikroTik `www` disabled), then retry.
+
+---
+
+## 4. DSM — Reverse Proxy Rule
+
+**Control Panel → Login Portal → Advanced → Reverse Proxy → Create**
+
+| Field | Value |
+|---|---|
+| Source — Protocol | HTTPS |
+| Source — Hostname | `ev.bellee.net` |
+| Source — Port | `443` |
+| Source — Enable HSTS | ✅ |
+| Destination — Protocol | HTTP |
+| Destination — Hostname | `localhost` |
+| Destination — Port | `8090` |
+
+**Custom Header tab → Create → WebSocket** (adds `Upgrade` and `Connection` headers).
+
+**Advanced → SSL Certificate**: bind the Let's Encrypt cert from step 3.
+
+Result: `https://ev.bellee.net` (TLS terminated by DSM) → `http://localhost:8090` (your container).
+
+---
+
+## 5. NAS — Project Files
+
+```bash
+ssh chris@<nas>
+sudo mkdir -p /volume1/docker/solar-ev-charger/secrets
+cd /volume1/docker/solar-ev-charger
+```
+
+Copy the following files from your dev machine:
+
+```bash
+# From your Mac
+NAS=chris@<nas>
+DEST=/volume1/docker/solar-ev-charger
+scp -O docker-compose.yml docker-compose.ghcr.yml .env $NAS:$DEST/
+scp -O secrets/fleet-key.pem secrets/com.tesla.3p.public-key.pem $NAS:$DEST/secrets/
+```
+
+### 5.1 `.env` template
+
+```ini
+# --- Tesla OAuth (required, even in test mode, for /auth/tesla bootstrap) ---
+TESLA_CLIENT_ID=<from Tesla dev portal>
+TESLA_CLIENT_SECRET=<from Tesla dev portal>
+TESLA_REDIRECT_URI=https://ev.bellee.net/auth/tesla/callback
+TESLA_REGION=na
+TESLA_SCOPE=openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds
+TESLA_PRIVATE_KEY_PATH=/secrets/fleet-key.pem
+TESLA_PUBLIC_KEY_PEM_PATH=/secrets/com.tesla.3p.public-key.pem
+TESLA_VIN=<your VIN>
+TESLA_REFRESH_TOKEN=
+TESLA_TOKEN_PATH=/data/tesla-refresh-token
+TESLA_TEST_MODE=true                # flip to false after bootstrap
+OAUTH_STATE_HMAC_KEY=<openssl rand -hex 32>
+
+# --- Sungrow inverter ---
+SUNGROW_HOST=192.168.88.106
+SUNGROW_PORT=8082
+
+# --- Charging logic ---
+POLL_INTERVAL_SECONDS=10
+MIN_CHARGE_AMPS=5
+MAX_CHARGE_AMPS=32
+LINE_VOLTAGE=240
+DEADBAND_POLLS=3
+WAKE_THRESHOLD_POLLS=6
+
+# --- Web ---
+HTTP_HOST=0.0.0.0
+HTTP_PORT=8080
+HTTP_AUTH_USER=admin
+HTTP_AUTH_PASSWORD=<openssl rand -base64 24>
+TLS_ENABLED=false                   # DSM terminates TLS
+
+# --- Storage / logging ---
+DB_PATH=/data/solar-ev-charger.db
+DB_RETENTION_DAYS=365
+LOG_LEVEL=info
+OTEL_TRACES_EXPORTER=none
+OTEL_METRICS_EXPORTER=none
+OTEL_LOGS_EXPORTER=none
+```
+
+`TESLA_TEST_MODE=true` is intentional for first boot — the OAuth flow needs to run before the controller can talk to your vehicle. We flip it after step 7.
+
+See [Configuration Reference](#configuration-reference) for the complete list of variables.
+
+### 5.2 `docker-compose.ghcr.yml` (override that pins to GHCR image)
+
+```yaml
+services:
+  solar-ev-charger:
+    image: ghcr.io/cbellee/ev-solar-charger:latest
+    container_name: solar-ev-charger
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    env_file:
+      - .env
+    volumes:
+      - solar-data:/data
+      - ./secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD", "/solar-ev-charger", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  solar-data:
+```
+
+The base `docker-compose.yml` (used for local builds) should not publish ports 80/443/8080 to avoid collisions.
+
+---
+
+## 6. Start the Container
+
+```bash
+cd /volume1/docker/solar-ev-charger
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml ps
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml logs --tail=50 solar-ev-charger
+```
+
+Smoke test from your Mac (or cellular):
+
+```bash
+curl -kI https://ev.bellee.net/healthz                    # 200 OK, no auth
+curl -ku admin:'<password>' -I https://ev.bellee.net/      # 200 OK with auth
+```
+
+---
+
+## 7. Tesla Fleet API — Partner Registration & OAuth Bootstrap
+
+### 7.1 Register the partner account (one-time)
+
+From your Mac:
+
+```bash
+# 1. Get a client_credentials access token. Note: --data-urlencode handles
+#    special characters (& ^ etc.) in client_secret correctly.
+curl -X POST https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode "client_id=$TESLA_CLIENT_ID" \
+  --data-urlencode "client_secret=$TESLA_CLIENT_SECRET" \
+  --data-urlencode 'scope=openid vehicle_device_data vehicle_cmds vehicle_charging_cmds' \
+  --data-urlencode 'audience=https://fleet-api.prd.na.vn.cloud.tesla.com'
+
+# 2. Register your domain (Tesla fetches the public PEM from /.well-known/...)
+ACCESS_TOKEN='<access_token from above>'
+curl -X POST https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/partner_accounts \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"domain":"ev.bellee.net"}'
+
+# 3. Verify
+curl -X GET 'https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/partner_accounts/public_key?domain=ev.bellee.net' \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+The `partner_accounts` POST must return your domain's public key. If it fails, check that `https://ev.bellee.net/.well-known/appspecific/com.tesla.3p.public-key.pem` is publicly reachable and serves your PEM.
+
+### 7.2 Run the OAuth flow
+
+In a **fresh incognito tab** (your Mac if hairpin works, otherwise cellular):
+
+1. Visit `https://ev.bellee.net/auth/tesla`
+2. Enter basic auth (`admin` / `<password>`)
+3. You're redirected to `auth.tesla.com` — sign in with your Tesla account
+4. Approve the requested scopes
+5. Tesla redirects back to `https://ev.bellee.net/auth/tesla/callback?...`
+6. Browser shows: **"Tesla authorization complete — Refresh token saved to /data/tesla-refresh-token and activated."**
+
+Verify the token was persisted:
+
+```bash
+sudo ls -la /volume1/@docker/volumes/solar-ev-charger_solar-data/_data/
+# Should include: tesla-refresh-token (mode 0600)
+```
+
+### 7.3 (Optional) Pair the virtual key to the vehicle
+
+If your vehicle requires command signing, pair the Fleet virtual key by visiting on a phone signed in to the Tesla app:
+
+```
+https://tesla.com/_ak/ev.bellee.net
+```
+
+### 7.4 Disable test mode
+
+```bash
+cd /volume1/docker/solar-ev-charger
+sudo sed -i 's/^TESLA_TEST_MODE=true/TESLA_TEST_MODE=false/' .env
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --force-recreate
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml logs --tail=50 solar-ev-charger
+```
+
+The controller picks up the refresh token, exchanges it for an access token, and starts polling the inverter and vehicle.
+
+---
+
+## 8. Operations
+
+### Update to a new image
+
+```bash
+cd /volume1/docker/solar-ev-charger
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --force-recreate
+```
+
+### Logs
+
+```bash
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml logs -f --tail=100 solar-ev-charger
+```
+
+### Inspect environment loaded by the running container
+
+The image is distroless — no shell. Use `docker inspect` from the host:
+
+```bash
+sudo docker inspect solar-ev-charger_solar-ev-charger_1 \
+  --format '{{range .Config.Env}}{{println .}}{{end}}'
+```
+
+### Backup the data volume
+
+```bash
+sudo tar -C /volume1/@docker/volumes/solar-ev-charger_solar-data/_data \
+    -czf /volume1/backups/solar-ev-charger-$(date +%F).tar.gz .
+```
+
+Contains the SQLite DB and the Tesla refresh token.
+
+### Rotate the Tesla refresh token
+
+Re-run the `/auth/tesla` flow at any time — the new token overwrites the old one atomically.
+
+### Stop the stack
+
+```bash
+cd /volume1/docker/solar-ev-charger
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml down
+```
+
+Data persists in the `solar-data` named volume.
+
+---
+
+## 9. Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Cert issuance fails | Port 80 not reaching NAS | Re-check Cloudflare record, MikroTik forward, MikroTik `www` disabled |
+| Container exits at startup | Missing required env var | `docker-compose ... logs --tail=100`; check `.env` |
+| `/auth/tesla` returns dashboard instead of redirecting | Old image (pre-fix) | `pull` and `up -d --force-recreate` |
+| Tesla page: "Client authentication failed" | Partner account not registered, or `client_id` empty in redirect | Run step 7.1; verify with `curl ... /auth/tesla` and grep `Location:` for `client_id=...` |
+| Tesla token exchange fails after callback | Wrong region or secret | Check `TESLA_REGION` and `TESLA_CLIENT_SECRET` (special chars work via `env_file`) |
+| Container running but `/data` empty | Looking at wrong path | Real path is `/volume1/@docker/volumes/solar-ev-charger_solar-data/_data/` (named volume), not the project's `./data` |
+| LAN browser can't reach `https://ev.bellee.net` | No hairpin NAT | Add the rules in step 2.5 |
+| Tesla domain validation still fails | Cloudflare proxied (orange cloud) | Switch to DNS only (grey cloud); confirm cert is trusted from outside the LAN |
+| OAuth callback returns generic error | Mismatch in `TESLA_REDIRECT_URI` or missing `OAUTH_STATE_HMAC_KEY` | Confirm exact match with Tesla portal; confirm key set in `.env` |
+
+---
+
+## 10. Security Notes
+
+- TLS terminates at DSM nginx; the container speaks plain HTTP on `localhost:8090` and is not exposed to the LAN
+- Basic auth gates the dashboard and all `/api/*` endpoints. Use a strong password (`openssl rand -base64 24`)
+- `/auth/tesla*`, `/.well-known/appspecific/com.tesla.3p.public-key.pem`, and `/healthz` are intentionally public (Tesla and Let's Encrypt need to reach them)
+- The refresh token file has mode `0600` inside a `0700` directory
+- The HMAC key (`OAUTH_STATE_HMAC_KEY`) signs the OAuth state cookie — never commit it
+- The Tesla private key (`fleet-key.pem`) is mounted read-only at `/secrets/fleet-key.pem`. The host directory is git-ignored
+- State-changing JSON APIs (`POST /api/control`, `POST /api/mode`) require `Content-Type: application/json` and reject bodies larger than 4 KiB
+- When the container's own TLS listener is enabled, the HTTPS listener requires TLS 1.3 or newer
+- OAuth callback errors are logged server-side; only generic messages are shown in the browser. Check application logs for full error detail
+- Never commit `.env`, `secrets/`, or `*.pem` files. The repo's `.gitignore` and `.dockerignore` exclude these paths; rotate any secret that was previously committed
+- Rotate `TESLA_CLIENT_SECRET` in the dev portal if it's ever pasted in chat or logs
+
+---
+
+# Part B — Reference
 
 ## System Overview
 
@@ -13,11 +497,11 @@ This application monitors surplus solar generation from a Sungrow SG8.0RS invert
 └──────────────┘                    ├───────────────────┤                    └─────────────┘
                                      │  SQLite (WAL)      │
                                      │  Web UI (htmx/SSE) │
-                                     │  OTel observability │
+                                     │  OTel observability│
                                      └───────────────────┘
 ```
 
-Key packages:
+### Key packages
 
 | Package | Purpose |
 |---|---|
@@ -113,9 +597,9 @@ After each tick, the current `StateSnapshot` is broadcast to all connected SSE c
 
 The WiNet-S dongle exposes a local network API (no cloud dependency):
 
-1. **WebSocket handshake** — connect to `ws://<host>:<port>/ws/home/overview`, send a `connect` message, receive a session token.
-2. **HTTP register reads** — `GET http://<host>/device/getParam?param_addr=<addr>&token=<token>&...` returns register values as comma-separated 16-bit words (`"high,low"`).
-3. **Token refresh** — if the HTTP API returns `result_code: 106`, the client automatically reconnects via WebSocket to obtain a new token and retries the read.
+1. **WebSocket handshake** — connect to `ws://<host>:<port>/ws/home/overview`, send a `connect` message, receive a session token
+2. **HTTP register reads** — `GET http://<host>/device/getParam?param_addr=<addr>&token=<token>&...` returns register values as comma-separated 16-bit words (`"high,low"`)
+3. **Token refresh** — if the HTTP API returns `result_code: 106`, the client automatically reconnects via WebSocket to obtain a new token and retries the read
 
 All communication is on the local network. The dongle must be reachable from wherever the container runs.
 
@@ -125,11 +609,11 @@ All communication is on the local network. The dongle must be reachable from whe
 
 The Tesla Fleet API uses OAuth2 with the following flow:
 
-1. **Initial setup** — you register an application at [developer.tesla.com](https://developer.tesla.com) and obtain a `client_id`, `client_secret`, and a `refresh_token` by completing the OAuth2 authorization code flow once manually.
-2. **Token refresh** — the app uses the refresh token to obtain short-lived access tokens automatically. Tokens are refreshed on 401 responses.
-3. **Vehicle commands** — `SetChargingAmps`, `StartCharging`, `StopCharging`, and `WakeUp` are called via the Fleet API REST endpoints.
-4. **Virtual Key (optional)** — if `TESLA_PRIVATE_KEY_PATH` points to an EC private key, the client can sign commands. This is required for newer vehicles. See Tesla's Fleet API documentation for key generation and vehicle pairing.
-5. **Regions** — the API endpoint is selected by `TESLA_REGION`: `na` (North America), `eu` (Europe), or `cn` (China).
+1. **Initial setup** — register an application at [developer.tesla.com](https://developer.tesla.com) and obtain a `client_id`, `client_secret`, and a `refresh_token` by completing the OAuth2 authorization code flow once via the in-app `/auth/tesla` route (see Part A, step 7)
+2. **Token refresh** — the app uses the refresh token to obtain short-lived access tokens automatically. Tokens are refreshed on 401 responses
+3. **Vehicle commands** — `SetChargingAmps`, `StartCharging`, `StopCharging`, and `WakeUp` are called via the Fleet API REST endpoints
+4. **Virtual Key (optional)** — if `TESLA_PRIVATE_KEY_PATH` points to an EC private key, the client can sign commands. Required for newer vehicles
+5. **Regions** — the API endpoint is selected by `TESLA_REGION`: `na` (North America), `eu` (Europe), or `cn` (China)
 
 ---
 
@@ -145,280 +629,23 @@ A single-page dashboard is served at `/` using Tailwind CSS, htmx, and native `E
 
 ### API Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/` | HTML dashboard |
-| `GET` | `/api/state` | Current controller snapshot (JSON) |
-| `GET` | `/events` | SSE stream of state updates |
-| `POST` | `/api/control` | Manual commands: `start`, `stop`, `set_amps` |
-| `POST` | `/api/mode` | Switch between `auto` and `manual` mode |
-| `GET` | `/api/history` | Paginated readings (`from`, `to`, `interval`, `limit`, `offset`) |
-| `GET` | `/api/sessions` | Paginated charge sessions |
-| `GET` | `/api/events` | Paginated events |
-| `GET` | `/api/search` | Full-text search (`q`, `from`, `to`, `limit`) |
-| `GET` | `/api/usage` | Current month's Tesla API usage counters and cost (JSON) |
-| `GET` | `/api/usage/history` | Historical API usage snapshots (`from`, `to`, `limit`) |
-| `GET` | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Tesla public key endpoint for app/domain verification |
-| `GET` | `/auth/tesla` | Starts Tesla OAuth2 authorization code flow |
-| `GET` | `/auth/tesla/callback` | OAuth2 callback endpoint for code exchange |
-| `GET` | `/healthz` | Health check (returns 200) |
-
----
-
-## Running the Container
-
-### Prerequisites
-
-- Docker and Docker Compose
-- Sungrow inverter with WiNet-S dongle on the local network
-- Tesla developer account with OAuth2 credentials
-
-### 1. Create the environment file
-
-```bash
-cp .env.example .env
-# Edit .env with your actual values
-```
-
-### 2. Generate the Tesla Fleet API keypair
-
-The Tesla Fleet API uses an EC P-256 (`prime256v1`) keypair. The private key signs vehicle commands; the public key is served at `/.well-known/appspecific/com.tesla.3p.public-key.pem` for Tesla domain verification and virtual key pairing.
-
-Use the helper script:
-
-```bash
-./scripts/generate-tesla-key.sh
-```
-
-This writes:
-
-- `secrets/fleet-key.pem` (private key, `chmod 600`) -> mounted to `/secrets/fleet-key.pem`
-- `secrets/com.tesla.3p.public-key.pem` (public key) -> mounted to `/secrets/com.tesla.3p.public-key.pem`
-
-Optional environment variables:
-
-- `SECRETS_DIR` to write keys to a different directory (default `./secrets`)
-- `FORCE=1` to overwrite existing key files
-
-After generation:
-
-1. Confirm `TESLA_PRIVATE_KEY_PATH` and `TESLA_PUBLIC_KEY_PEM_PATH` in `.env` point to the mounted files.
-2. Once the app is reachable over HTTPS, verify the public key URL returns HTTP 200:
-   `https://<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem`
-3. Pair the virtual key to the vehicle by visiting `https://tesla.com/_ak/<your-domain>` on a phone signed in to the Tesla app.
-
-If you ever leak the private key, regenerate the keypair with `FORCE=1`, redeploy, re-verify the domain, and re-pair the vehicle.
-
-If you already have a `fleet-key.pem` from another source, you can place it manually instead:
-
-```bash
-mkdir -p secrets
-cp /path/to/your/fleet-key.pem secrets/fleet-key.pem
-chmod 600 secrets/fleet-key.pem
-openssl ec -in secrets/fleet-key.pem -pubout -out secrets/com.tesla.3p.public-key.pem
-```
-
-### 3. Start the container
-
-```bash
-docker compose up -d
-```
-
-The dashboard is available at `http://localhost:8080` and is protected with HTTP basic auth using `HTTP_AUTH_USER` and `HTTP_AUTH_PASSWORD`. Both variables are required; there is no default username.
-
-#### Security notes
-
-- State-changing JSON APIs (`POST /api/control`, `POST /api/mode`) require `Content-Type: application/json` and reject request bodies larger than 4 KiB. This blocks simple cross-site form-based CSRF and bounds memory usage.
-- When TLS is enabled, the HTTPS listener requires TLS 1.3 or newer.
-- OAuth callback errors are logged server-side; only generic messages are shown in the browser. Check application logs for full error detail.
-- Never commit `.env`, `secrets/`, or `*.pem` files. The repository ships with `.gitignore` and `.dockerignore` rules that exclude these paths; if any secret was previously committed, rotate it.
-
-### Build and Publish with GitHub Actions (GHCR)
-
-This repository includes a workflow at `.github/workflows/container-ghcr.yml` that builds the container and publishes it to GitHub Container Registry (GHCR).
-
-#### Triggers
-
-- Pull requests: build-only validation (no push)
-- Push to `main`: build and push image
-- Tag push matching `v*`: build and push versioned image
-- Manual run: supported via **workflow_dispatch**
-
-#### Image location and tags
-
-- Registry: `ghcr.io`
-- Image name: `ghcr.io/<owner>/<repo>`
-- Tags generated by the workflow include branch, tag, commit SHA, PR tag, and `latest` on the default branch
-
-#### Required GitHub settings
-
-1. Ensure repository Actions are enabled.
-2. Ensure package publishing is allowed for `GITHUB_TOKEN`.
-3. If you want to pull the image from another private repository or host, use a PAT with `read:packages`.
-
-#### Deploy using the GHCR image (no local build)
-
-Create a compose override file (example `docker-compose.ghcr.yml`):
-
-```yaml
-services:
-    solar-ev-charger:
-        image: ghcr.io/<owner>/<repo>:latest
-        pull_policy: always
-```
-
-Run with:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --pull always --no-build
-```
-
-### Hosting on Synology NAS
-
-These steps target DSM 7.1.1 using the legacy Docker application.
-
-#### Option A: Docker application UI (DSM 7.1.1)
-
-1. Create a project folder on the NAS, for example `/volume1/docker/solar-ev-charger`.
-2. Copy this repository into that folder so `docker-compose.yml`, `.env`, and `secrets/` are in the same directory.
-3. In DSM, open **Docker** -> **Registry** and pull `golang:1.25-alpine` only if you plan to build on NAS; otherwise use SSH deployment in Option B.
-4. In DSM, open **Docker** -> **Container** -> **Create** and use your prebuilt image name if available.
-5. Map ports `8080:8080`, `80:8081`, and `443:8443`.
-6. Mount `secrets` as read-only to `/secrets` and mount persistent storage to `/data`.
-7. Set environment variables from `.env` in the container settings.
-8. Start the container and confirm health is `healthy`.
-
-For repeatable deployments and easier updates, Option B is strongly recommended.
-
-#### Option B: SSH on Synology
-
-Enable SSH in DSM and run:
-
-```bash
-cd /volume1/docker/solar-ev-charger
-docker compose pull
-docker compose up -d
-docker compose logs -f solar-ev-charger
-```
-
-#### Synology-specific notes
-
-- Keep persistent data under a NAS shared folder or named Docker volume. This app writes database and tokens under `/data` in the container.
-- If using TLS for Tesla OAuth, keep ports `80` and `443` reachable from the internet to the NAS and mapped as defined in `docker-compose.yml`.
-- If you use MikroTik forwarding, set `LAN_HOST` in `mikrotik_port_forward.sh` to the Synology NAS LAN IP.
-- If DSM Firewall is enabled, allow inbound TCP `80`, `443`, and optionally `8080` (local dashboard access).
-- After `.env` changes, redeploy with `docker compose up -d` to apply new values.
-
-#### Synology troubleshooting
-
-1. **Container never becomes healthy**
-    - Check logs from SSH: `docker compose logs -f solar-ev-charger`
-    - Or check DSM Docker UI: **Docker** -> **Container** -> **Details** -> **Log**.
-    - Confirm `.env` values are valid and `HTTP_AUTH_PASSWORD` is set.
-    - Ensure the app can write to `/data` (database and token file path).
-
-2. **TLS certificate is not issued**
-    - Confirm `TLS_ENABLED=true` and `TLS_DOMAIN=ev.bellee.net` in `.env`.
-    - Verify internet can reach NAS on TCP `80` and `443`.
-    - Confirm Cloudflare is DNS-only (grey cloud), not proxied.
-    - Wait a few minutes after first start, then check logs for ACME errors.
-
-3. **Tesla domain validation still fails**
-    - Open `https://ev.bellee.net` from a device outside your LAN and verify a valid public certificate is shown.
-    - Open `https://ev.bellee.net/.well-known/appspecific/com.tesla.3p.public-key.pem` and verify HTTP `200`.
-    - Re-check Tesla portal values for origin and redirect URLs.
-
-4. **OAuth callback returns an error**
-    - Confirm `TESLA_REDIRECT_URI` exactly matches the Tesla portal redirect URI.
-    - Confirm `OAUTH_STATE_HMAC_KEY` is set and non-empty.
-    - Confirm `TESLA_PUBLIC_KEY_PEM_PATH` points to a real file mounted in the container.
-
-5. **Refresh token not persisted**
-    - Confirm `TESLA_TOKEN_PATH` points under writable `/data`.
-    - Check directory/file permissions on the Synology bind mount or volume.
-    - Trigger OAuth start again at `/auth/tesla` and inspect logs for write errors.
-
-### Public HTTPS setup for Tesla OAuth (`ev.bellee.net`)
-
-Tesla validates the registered domain and callback URL. For this deployment:
-
-- use `ev.bellee.net` (Tesla rejects domain names containing `tesla`)
-- make sure the domain has a publicly trusted TLS certificate
-- use DNS-only Cloudflare records (grey cloud), not proxied
-
-#### 1. Configure `.env` for TLS + OAuth
-
-```bash
-TESLA_REDIRECT_URI=https://ev.bellee.net/auth/tesla/callback
-TLS_ENABLED=true
-TLS_DOMAIN=ev.bellee.net
-TLS_CERT_DIR=/data/autocert
-TLS_PORT=8443
-HTTP_CHALLENGE_PORT=8081
-```
-
-#### 2. Configure Cloudflare DNS
-
-- Create an `A` record for `ev.bellee.net` to your home public IP.
-- Set proxy status to **DNS only** (grey cloud).
-
-#### 3. Configure MikroTik port forwarding
-
-This repository includes `mikrotik_port_forward.sh` for automated RouterOS NAT rule setup.
-
-```bash
-chmod +x ./mikrotik_port_forward.sh
-
-ROUTER_HOST=192.168.88.1 \
-ROUTER_USER=admin \
-LAN_HOST=192.168.88.50 \
-ROUTER_IDENTITY_FILE=~/.ssh/id_ed25519 \
-./mikrotik_port_forward.sh
-```
-
-This creates forwards:
-
-- TCP `80` -> app challenge port `8081`
-- TCP `443` -> app TLS port `8443`
-
-#### 4. Verify external reachability and certificate
-
-From outside your LAN:
-
-- `https://ev.bellee.net` loads with a valid certificate
-- `https://ev.bellee.net/.well-known/appspecific/com.tesla.3p.public-key.pem` returns `200`
-
-#### 5. Tesla developer portal values
-
-- Allowed Origin URL(s): `https://ev.bellee.net`
-- Allowed Redirect URI(s): `https://ev.bellee.net/auth/tesla/callback`
-- Allowed Returned URL(s): leave blank initially (or `https://ev.bellee.net`)
-
-### 4. View logs
-
-```bash
-docker compose logs -f solar-ev-charger
-```
-
-### 5. Stop
-
-```bash
-docker compose down
-```
-
-Data is persisted in the `solar-data` Docker volume.
-
-### Running without Docker
-
-```bash
-# Set environment variables (see .env.example)
-export SUNGROW_HOST=192.168.1.100
-export TESLA_TEST_MODE=true
-
-go run ./cmd/server
-```
-
-With `TESLA_TEST_MODE=true`, the Tesla OAuth and VIN variables are optional.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/` | Basic auth | HTML dashboard |
+| `GET` | `/api/state` | Basic auth | Current controller snapshot (JSON) |
+| `GET` | `/events` | Basic auth | SSE stream of state updates |
+| `POST` | `/api/control` | Basic auth | Manual commands: `start`, `stop`, `set_amps` |
+| `POST` | `/api/mode` | Basic auth | Switch between `auto` and `manual` mode |
+| `GET` | `/api/history` | Basic auth | Paginated readings (`from`, `to`, `interval`, `limit`, `offset`) |
+| `GET` | `/api/sessions` | Basic auth | Paginated charge sessions |
+| `GET` | `/api/events` | Basic auth | Paginated events |
+| `GET` | `/api/search` | Basic auth | Full-text search (`q`, `from`, `to`, `limit`) |
+| `GET` | `/api/usage` | Basic auth | Current month's Tesla API usage counters and cost (JSON) |
+| `GET` | `/api/usage/history` | Basic auth | Historical API usage snapshots (`from`, `to`, `limit`) |
+| `GET` | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Public | Tesla public key endpoint for app/domain verification |
+| `GET` | `/auth/tesla` | Basic auth | Starts Tesla OAuth2 authorization code flow |
+| `GET` | `/auth/tesla/callback` | Public | OAuth2 callback endpoint for code exchange |
+| `GET` | `/healthz` | Public | Health check (returns 200) |
 
 ---
 
@@ -429,13 +656,13 @@ All configuration is via environment variables:
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `SUNGROW_HOST` | Yes | — | IP or hostname of the WiNet-S dongle |
+| `SUNGROW_PORT` | No | `8082` | WiNet-S WebSocket port |
 | `TESLA_CLIENT_ID` | Yes | — | Tesla OAuth2 client ID |
 | `TESLA_CLIENT_SECRET` | Yes | — | Tesla OAuth2 client secret |
-| `TESLA_REFRESH_TOKEN` | Conditionally | — | Tesla OAuth2 refresh token (required if no token file is available) |
+| `TESLA_REFRESH_TOKEN` | Conditionally | — | Tesla OAuth2 refresh token (required if no token file exists) |
 | `TESLA_REDIRECT_URI` | Yes | — | OAuth callback URL, e.g. `https://ev.bellee.net/auth/tesla/callback` |
-| `TESLA_VIN` | Yes | — | Vehicle identification number |
+| `TESLA_VIN` | Yes (when `TESLA_TEST_MODE=false`) | — | Vehicle identification number |
 | `TESLA_TEST_MODE` | No | `false` | Skip Tesla connectivity and publish projected charging values only |
-| `SUNGROW_PORT` | No | `8082` | WiNet-S WebSocket port |
 | `TESLA_PRIVATE_KEY_PATH` | No | `/secrets/fleet-key.pem` | Path to EC private key for command signing |
 | `TESLA_PUBLIC_KEY_PEM_PATH` | Yes | `/secrets/com.tesla.3p.public-key.pem` | Path to Tesla app public key served via `/.well-known` |
 | `TESLA_REGION` | No | `na` | Fleet API region: `na`, `eu`, `cn` |
@@ -453,8 +680,9 @@ All configuration is via environment variables:
 | `AMPS_CHANGE_THRESHOLD` | No | `2` | Minimum amp change to send a `SetChargingAmps` command |
 | `HTTP_AUTH_USER` | Yes | — | HTTP basic auth username for the dashboard and API |
 | `HTTP_AUTH_PASSWORD` | Yes | — | HTTP basic auth password for the dashboard and API |
-| `HTTP_PORT` | No | `8080` | Web server port |
-| `TLS_ENABLED` | No | `false` | Enable HTTPS listener with Let's Encrypt autocert |
+| `HTTP_HOST` | No | `0.0.0.0` | Bind address for the HTTP listener |
+| `HTTP_PORT` | No | `8080` | Web server port inside the container |
+| `TLS_ENABLED` | No | `false` | Enable HTTPS listener with Let's Encrypt autocert (set `false` when DSM terminates TLS) |
 | `TLS_DOMAIN` | Conditionally | — | Public hostname for certificate issuance (required when `TLS_ENABLED=true`) |
 | `TLS_CERT_DIR` | No | `/data/autocert` | Directory used to cache ACME certificates |
 | `TLS_PORT` | No | `8443` | HTTPS listener port inside the container |
@@ -462,29 +690,32 @@ All configuration is via environment variables:
 | `LOG_LEVEL` | No | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `DB_PATH` | No | `/data/solar-ev-charger.db` | SQLite database path |
 | `DB_RETENTION_DAYS` | No | `365` | Days of data to retain before pruning |
+| `OTEL_TRACES_EXPORTER` | No | `none` | Set to `otlp` and configure `OTEL_EXPORTER_OTLP_ENDPOINT` to ship traces |
+| `OTEL_METRICS_EXPORTER` | No | `none` | Set to `otlp` to ship metrics |
+| `OTEL_LOGS_EXPORTER` | No | `none` | Set to `otlp` to ship logs |
 
 ---
 
 ## Outstanding Tasks
 
-The following items must be completed by the user before running against real hardware:
+The following items must be completed by the user before running against real hardware. Most are covered in Part A; this is a checklist:
 
 ### Tesla Fleet API Setup
 
-1. **Register a Tesla Developer application** at [developer.tesla.com](https://developer.tesla.com) to obtain your `client_id` and `client_secret`.
-    - Use a domain that does not include `tesla` (for example `ev.bellee.net`).
-    - Configure Cloudflare record as DNS-only so Tesla validation can pass.
-2. **Complete the OAuth2 authorization code flow** once to obtain an initial `refresh_token`. Tesla's documentation walks through this process — it involves directing the user to Tesla's auth page, receiving a callback with an authorization code, and exchanging it for tokens.
-3. **Generate and pair a Fleet API virtual key** (EC P-256 private key) if your vehicle requires command signing. Run `./scripts/generate-tesla-key.sh` to create `secrets/fleet-key.pem` and `secrets/com.tesla.3p.public-key.pem`, then pair the key to the vehicle via `https://tesla.com/_ak/<your-domain>`.
+1. **Register a Tesla Developer application** (Part A, step 1.1)
+2. **Generate the keypair** (Part A, step 1.2)
+3. **Run partner registration** (Part A, step 7.1)
+4. **Complete the OAuth bootstrap** via `/auth/tesla` (Part A, step 7.2)
+5. **Pair the virtual key** to the vehicle if command signing is required (Part A, step 7.3)
 
 ### Network & Hardware
 
-4. **Ensure the WiNet-S dongle is reachable** from the machine/container running this application. The dongle typically serves on port 8082 on the local network. Verify with: `curl http://<SUNGROW_HOST>:8082/`.
-5. **Verify the correct Modbus register addresses** for your specific Sungrow inverter model. The register addresses (5031, 5083, 5091) are based on the SG8.0RS; other models may use different addresses.
+6. **Ensure the WiNet-S dongle is reachable** from the container. Verify with: `curl http://<SUNGROW_HOST>:8082/`
+7. **Verify the correct Modbus register addresses** for your specific Sungrow inverter model. The register addresses (5031, 5083, 5091) are based on the SG8.0RS; other models may use different addresses
 
 ### Operational
 
-6. **Tune the charging parameters** (`MIN_CHARGE_AMPS`, `MAX_CHARGE_AMPS`, `LINE_VOLTAGE`, `DEADBAND_POLLS`, `WAKE_THRESHOLD_POLLS`) for your specific installation. The defaults are reasonable starting points but may need adjustment based on your solar array size, grid connection, and EV charger capacity.
-7. **Set up monitoring** (optional) — configure `OTEL_EXPORTER_OTLP_ENDPOINT` to ship traces, metrics, and logs to an OpenTelemetry collector (e.g. Grafana Alloy, Jaeger, Prometheus).
-8. **Set up backups** for the SQLite database volume if you want to preserve historical data across container rebuilds.
-9. **Review the auto/manual mode** — the system starts in `auto` mode. Use the dashboard or `POST /api/mode` to switch to `manual` mode if you want to control charging manually via the API.
+8. **Tune the charging parameters** (`MIN_CHARGE_AMPS`, `MAX_CHARGE_AMPS`, `LINE_VOLTAGE`, `DEADBAND_POLLS`, `WAKE_THRESHOLD_POLLS`) for your specific installation
+9. **Set up monitoring** (optional) — configure `OTEL_EXPORTER_OTLP_ENDPOINT` to ship telemetry to an OpenTelemetry collector
+10. **Set up backups** for the SQLite database volume (Part A, step 8)
+11. **Review the auto/manual mode** — the system starts in `auto` mode. Use the dashboard or `POST /api/mode` to switch to `manual`
