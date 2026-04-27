@@ -175,10 +175,7 @@ func (s *oauthServer) buildAuthorizeURL(state string) (string, error) {
 	q.Set("redirect_uri", s.cfg.TeslaRedirectURI)
 	q.Set("scope", s.cfg.TeslaScope)
 	q.Set("state", state)
-	q.Set("prompt_missing_scopes", "true")
-	q.Set("require_requested_scopes", "true")
-	q.Set("show_keypair_step", "true")
-	q.Set("locale", "en-US")
+	q.Set("prompt", "login")
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
