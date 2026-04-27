@@ -2,9 +2,7 @@ services:
   solar-ev-charger:
     build: .
     ports:
-      - "8080:8080"
-      - "80:8081"
-      - "443:8443"
+      - "8090:8080"
     env_file: .env
     environment:
       HTTP_HOST: 0.0.0.0

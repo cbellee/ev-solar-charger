@@ -38,12 +38,12 @@ func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logge
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", handleHealthz)
 
-	if !cfg.TeslaTestMode {
-		oauth := newOAuthServer(cfg, vehicle, logger)
-		rootMux.HandleFunc("GET /.well-known/appspecific/com.tesla.3p.public-key.pem", oauth.handlePublicKey)
-		rootMux.HandleFunc("GET /auth/tesla", oauth.handleOAuthStart)
-		rootMux.HandleFunc("GET /auth/tesla/callback", oauth.handleOAuthCallback)
-	}
+	// OAuth routes are always registered so the refresh token can be
+	// bootstrapped via /auth/tesla even when TESLA_TEST_MODE=true.
+	oauth := newOAuthServer(cfg, vehicle, logger)
+	rootMux.HandleFunc("GET /.well-known/appspecific/com.tesla.3p.public-key.pem", oauth.handlePublicKey)
+	rootMux.HandleFunc("GET /auth/tesla", oauth.handleOAuthStart)
+	rootMux.HandleFunc("GET /auth/tesla/callback", oauth.handleOAuthCallback)
 
 	rootMux.Handle("/", basicAuthMiddleware(otelhttp.NewHandler(privateMux, "solar-ev-charger"), auth))
 
