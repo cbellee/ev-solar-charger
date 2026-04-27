@@ -81,46 +81,50 @@ func Load() (Config, error) {
 	cfg.TeslaRedirectURI = envOrDefault("TESLA_REDIRECT_URI", "")
 	cfg.TeslaScope = envOrDefault("TESLA_SCOPE", "openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds")
 
+	// Tesla OAuth credentials are required regardless of test mode so the
+	// /auth/tesla bootstrap flow can run before TESLA_TEST_MODE is disabled.
+	cfg.TeslaClientID, err = requireEnv("TESLA_CLIENT_ID")
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.TeslaClientSecret, err = requireEnv("TESLA_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.TeslaRefreshToken = envOrDefault("TESLA_REFRESH_TOKEN", "")
+
+	if strings.TrimSpace(cfg.TeslaRedirectURI) == "" {
+		return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI is required")
+	}
+
+	redirectURL, err := url.Parse(cfg.TeslaRedirectURI)
+	if err != nil {
+		return Config{}, fmt.Errorf("config: parse TESLA_REDIRECT_URI: %w", err)
+	}
+	if redirectURL.Scheme == "" || redirectURL.Host == "" {
+		return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI must be an absolute URL")
+	}
+	if redirectURL.Scheme != "https" && !isLocalHTTP(redirectURL) {
+		return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI must use https unless it targets localhost")
+	}
+
+	if strings.TrimSpace(cfg.TeslaPublicKeyPEMPath) == "" {
+		return Config{}, fmt.Errorf("config: TESLA_PUBLIC_KEY_PEM_PATH is required")
+	}
+
+	if strings.TrimSpace(cfg.OAuthStateHMACKey) == "" {
+		return Config{}, fmt.Errorf("config: OAUTH_STATE_HMAC_KEY is required")
+	}
+
 	if !cfg.TeslaTestMode {
-		cfg.TeslaClientID, err = requireEnv("TESLA_CLIENT_ID")
-		if err != nil {
-			return Config{}, err
-		}
-
-		cfg.TeslaClientSecret, err = requireEnv("TESLA_CLIENT_SECRET")
-		if err != nil {
-			return Config{}, err
-		}
-
-		cfg.TeslaRefreshToken = envOrDefault("TESLA_REFRESH_TOKEN", "")
-
 		cfg.TeslaVIN, err = requireEnv("TESLA_VIN")
 		if err != nil {
 			return Config{}, err
 		}
-
-		if strings.TrimSpace(cfg.TeslaRedirectURI) == "" {
-			return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI is required")
-		}
-
-		redirectURL, err := url.Parse(cfg.TeslaRedirectURI)
-		if err != nil {
-			return Config{}, fmt.Errorf("config: parse TESLA_REDIRECT_URI: %w", err)
-		}
-		if redirectURL.Scheme == "" || redirectURL.Host == "" {
-			return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI must be an absolute URL")
-		}
-		if redirectURL.Scheme != "https" && !isLocalHTTP(redirectURL) {
-			return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI must use https unless it targets localhost")
-		}
-
-		if strings.TrimSpace(cfg.TeslaPublicKeyPEMPath) == "" {
-			return Config{}, fmt.Errorf("config: TESLA_PUBLIC_KEY_PEM_PATH is required")
-		}
-
-		if strings.TrimSpace(cfg.OAuthStateHMACKey) == "" {
-			return Config{}, fmt.Errorf("config: OAUTH_STATE_HMAC_KEY is required")
-		}
+	} else {
+		cfg.TeslaVIN = envOrDefault("TESLA_VIN", "")
 	}
 
 	pollSec, err := envInt("POLL_INTERVAL_SECONDS", 10)

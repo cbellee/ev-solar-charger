@@ -269,6 +269,12 @@ func Test_Load_testModeSkipsTeslaCredentials(t *testing.T) {
 	t.Setenv("HTTP_AUTH_USER", "test-user")
 	t.Setenv("HTTP_AUTH_PASSWORD", "test-password")
 	t.Setenv("TESLA_TEST_MODE", "true")
+	// Tesla OAuth credentials are required even in test mode so the
+	// /auth/tesla bootstrap flow can run; only TESLA_VIN is optional.
+	t.Setenv("TESLA_CLIENT_ID", "test-client-id")
+	t.Setenv("TESLA_CLIENT_SECRET", "test-client-secret")
+	t.Setenv("TESLA_REDIRECT_URI", "https://example.com/auth/tesla/callback")
+	t.Setenv("OAUTH_STATE_HMAC_KEY", "test-hmac-key")
 
 	cfg, err := Load()
 	if err != nil {
