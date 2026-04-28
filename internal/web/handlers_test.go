@@ -127,11 +127,11 @@ func Test_handleState_returnsSnapshot(t *testing.T) {
 	}
 }
 
-func Test_handleIndex_returnsHTML(t *testing.T) {
+func Test_spaHandler_returnsHTML(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 
-	handleIndex(w, req)
+	spaHandler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -139,7 +139,7 @@ func Test_handleIndex_returnsHTML(t *testing.T) {
 	if got := w.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
 		t.Fatalf("content-type = %q, want html", got)
 	}
-	if body := w.Body.String(); !strings.Contains(body, "Solar EV Charger Controller") {
+	if body := w.Body.String(); !strings.Contains(body, "<div id=\"root\">") {
 		t.Fatalf("unexpected body: %q", body)
 	}
 }

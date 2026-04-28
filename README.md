@@ -56,8 +56,38 @@ See architecture details in architecture.md and operational guidance in instruct
 - internal/inverter: Sungrow connectivity
 - internal/tesla: OAuth, token refresh, and command/data client
 - internal/storage: SQLite schema and persistence
-- internal/web: dashboard, APIs, SSE, OAuth endpoints
+- internal/web: dashboard, APIs, SSE, OAuth endpoints (embeds web/dist via go:embed)
+- web/: Vite + React + TypeScript SPA source (built into internal/web/dist)
 - .github/workflows/container-ghcr.yml: CI workflow for building and publishing to GHCR
+
+## Web UI Development
+
+The dashboard is a single-page React app (Vite + TypeScript + Tailwind +
+TanStack Query). Source lives in `web/`; production output is written to
+`internal/web/dist/` and embedded into the Go binary at compile time.
+
+Local development:
+
+```bash
+# 1. Install web dependencies (Node 20+ required)
+cd web && npm install
+
+# 2. Run the Go backend (serves embedded SPA + APIs on :8080)
+cd .. && go run ./cmd/server
+
+# 3. In another shell, run the Vite dev server with HMR (proxies API/SSE to :8080)
+cd web && npm run dev
+# Open http://localhost:5173
+```
+
+Production build (must be run before `go build` if you've changed any web/ source):
+
+```bash
+cd web && npm run build   # writes ../internal/web/dist
+cd .. && go build ./cmd/server
+```
+
+The Docker build runs `npm run build` automatically in its first stage.
 
 ## Quick Start (Docker Compose)
 

@@ -22,8 +22,6 @@ type AuthConfig struct {
 func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logger *slog.Logger, auth AuthConfig, cfg config.Config, vehicle tesla.VehicleController) http.Handler {
 	privateMux := http.NewServeMux()
 
-	privateMux.HandleFunc("GET /", handleIndex)
-	privateMux.Handle("GET /images/", http.FileServer(http.FS(imageFS)))
 	privateMux.HandleFunc("GET /api/state", handleState(ctrl))
 	privateMux.Handle("GET /events", hub)
 	privateMux.HandleFunc("POST /api/control", handleControl(ctrl))
@@ -34,6 +32,10 @@ func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logge
 	privateMux.HandleFunc("GET /api/search", handleSearch(store))
 	privateMux.HandleFunc("GET /api/usage", handleAPIUsage(ctrl))
 	privateMux.HandleFunc("GET /api/usage/history", handleAPIUsageHistory(store))
+
+	// SPA fallback: any unmatched GET serves the React bundle (assets or
+	// index.html for client-side routes).
+	privateMux.Handle("GET /", spaHandler())
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", handleHealthz)

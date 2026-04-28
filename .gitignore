@@ -27,3 +27,11 @@ bin/
 dist/
 coverage.out
 *.out
+
+# Web (Vite) build artifacts. We commit a placeholder
+# internal/web/dist/index.html so `go build` works on fresh clones
+# (the //go:embed all:dist directive needs the directory to exist).
+# `npm run build` overwrites it with the real bundle plus assets/.
+web/node_modules/
+web/dist/
+internal/web/dist/assets/

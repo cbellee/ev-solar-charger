@@ -3,7 +3,7 @@ package web
 import (
 	"embed"
 	"encoding/json"
-	"html/template"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,19 +13,52 @@ import (
 	"github.com/cbellee/ev-solar-charger/internal/storage"
 )
 
-//go:embed templates/index.html
-var templateFS embed.FS
+// distFS embeds the React/Vite production bundle built into ../web by
+// `npm run build` (which outputs to internal/web/dist via vite.config.ts).
+//
+//go:embed all:dist
+var distFS embed.FS
 
-//go:embed images
-var imageFS embed.FS
+// distSubFS exposes the dist/ subtree at the FS root so http.FileServer can
+// serve `/assets/...` paths directly.
+var distSubFS = mustSub(distFS, "dist")
 
-var indexTemplate = template.Must(template.ParseFS(templateFS, "templates/index.html"))
-
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := indexTemplate.Execute(w, nil); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
+func mustSub(f embed.FS, dir string) fs.FS {
+	sub, err := fs.Sub(f, dir)
+	if err != nil {
+		panic(err)
 	}
+	return sub
+}
+
+// spaHandler serves static assets from the embedded SPA bundle. Unknown paths
+// (anything other than a real file) fall back to index.html so the React
+// router can handle client-side routing.
+func spaHandler() http.Handler {
+	fileServer := http.FileServer(http.FS(distSubFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cleaned := strings.TrimPrefix(r.URL.Path, "/")
+		if cleaned == "" {
+			serveIndex(w, r)
+			return
+		}
+		if _, err := fs.Stat(distSubFS, cleaned); err != nil {
+			serveIndex(w, r)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+func serveIndex(w http.ResponseWriter, _ *http.Request) {
+	data, err := fs.ReadFile(distSubFS, "index.html")
+	if err != nil {
+		http.Error(w, "index.html not found in embedded bundle", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
 }
 
 func handleState(ctrl *controller.Controller) http.HandlerFunc {
