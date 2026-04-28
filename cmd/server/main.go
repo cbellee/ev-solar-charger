@@ -181,12 +181,21 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 			}
 		}
 		if strings.TrimSpace(cfg.TeslaRefreshToken) == "" {
-			return fmt.Errorf("failed to create tesla client: TESLA_REFRESH_TOKEN is empty and token file %q was not usable", cfg.TeslaTokenPath)
-		}
-
-		vehicle, err = deps.newVehicle(cfg, logger, metrics)
-		if err != nil {
-			return fmt.Errorf("failed to create tesla client: %w", err)
+			logger.Warn("tesla refresh token missing; running in stub mode until /auth/tesla bootstrap is completed",
+				"token_path", cfg.TeslaTokenPath)
+			vehicle = tesla.NewTestModeController()
+		} else {
+			vehicle, err = deps.newVehicle(cfg, logger, metrics)
+			if err != nil {
+				// Don't crash the container: an invalid/expired refresh token
+				// would otherwise crash-loop forever and prevent the operator
+				// from re-bootstrapping via /auth/tesla. Fall back to the
+				// stub controller; OAuth callback still writes the new token
+				// to disk for the next restart.
+				logger.Error("tesla client initialization failed; running in stub mode until /auth/tesla bootstrap is completed and the container is restarted",
+					"error", err, "token_path", cfg.TeslaTokenPath)
+				vehicle = tesla.NewTestModeController()
+			}
 		}
 	}
 
