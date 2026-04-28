@@ -58,10 +58,10 @@ export function PowerFlowDiagram({ snap }: Props) {
         <path id="pathSG" d="M120 80 C 280 40, 320 40, 480 80" stroke={isExporting && hasPv ? "#10b981" : "#374151"} strokeWidth={2} fill="none" strokeDasharray="4 4" />
 
         {/* Nodes */}
-        <Node x={120} y={80} label="Solar" sub={hasPv ? `${(pv / 1000).toFixed(2)} kW` : "0 kW"} color="#fbbf24" icon="☀" />
-        <Node x={300} y={160} label="House" sub={`${(snap.loadWatts / 1000).toFixed(2)} kW`} color="#a78bfa" icon="🏠" />
-        <Node x={480} y={80} label="Grid" sub={isImporting ? `Import ${(grid / 1000).toFixed(2)} kW` : isExporting ? `Export ${(-grid / 1000).toFixed(2)} kW` : "0 kW"} color={isImporting ? "#ef4444" : "#10b981"} icon="⚡" />
-        <Node x={420} y={280} label={snap.carPluggedIn ? "EV" : "EV"} sub={evLabel} color={evVisible ? "#3b82f6" : "#6b7280"} icon="🚗" muted={!snap.carPluggedIn} />
+        <Node x={120} y={80} label="Solar" sub={hasPv ? `${(pv / 1000).toFixed(2)} kW` : "0 kW"} color="#fbbf24" image="/images/solar_panels.png" />
+        <Node x={300} y={160} label="House" sub={`${(snap.loadWatts / 1000).toFixed(2)} kW`} color="#a78bfa" image="/images/house.png" />
+        <Node x={480} y={80} label="Grid" sub={isImporting ? `Import ${(grid / 1000).toFixed(2)} kW` : isExporting ? `Export ${(-grid / 1000).toFixed(2)} kW` : "0 kW"} color={isImporting ? "#ef4444" : "#10b981"} image="/images/electricity_pylon.png" />
+        <Node x={420} y={280} label="EV" sub={evLabel} color={evVisible ? "#3b82f6" : "#6b7280"} image="/images/tesla_ev.png" muted={!snap.carPluggedIn} />
       </svg>
     </div>
   );
@@ -73,7 +73,7 @@ function Node({
   label,
   sub,
   color,
-  icon,
+  image,
   muted,
 }: {
   x: number;
@@ -81,19 +81,25 @@ function Node({
   label: string;
   sub: string;
   color: string;
-  icon: string;
+  image: string;
   muted?: boolean;
 }) {
+  const r = 36;
   return (
     <g className={clsx(muted && "opacity-50")}>
-      <circle cx={x} cy={y} r={36} fill="#111827" stroke={color} strokeWidth={2} />
-      <text x={x} y={y - 2} textAnchor="middle" fontSize="22" fill={color}>
-        {icon}
-      </text>
-      <text x={x} y={y + 16} textAnchor="middle" fontSize="10" fill="#e5e7eb">
+      <circle cx={x} cy={y} r={r} fill="#111827" stroke={color} strokeWidth={2} />
+      <image
+        href={image}
+        x={x - r + 6}
+        y={y - r + 6}
+        width={(r - 6) * 2}
+        height={(r - 6) * 2}
+        preserveAspectRatio="xMidYMid meet"
+      />
+      <text x={x} y={y + r + 14} textAnchor="middle" fontSize="11" fill="#e5e7eb" fontWeight="600">
         {label}
       </text>
-      <text x={x} y={y + 56} textAnchor="middle" fontSize="11" fill="#9ca3af">
+      <text x={x} y={y + r + 28} textAnchor="middle" fontSize="11" fill="#9ca3af">
         {sub}
       </text>
     </g>
