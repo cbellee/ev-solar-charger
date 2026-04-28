@@ -179,6 +179,8 @@ func defaultCfg() config.Config {
 		WakeAllowedEndHour:        24,
 		WakeTimezone:              time.UTC,
 		PluggedInStaleAfter:       24 * time.Hour,
+		ChargeStartRetry:          0, // no cooldown by default in legacy tests
+		CommandFailureBackoff:     0, // no cooldown by default in legacy tests
 		TeslaChargingPollInterval: 0, // poll every tick in tests
 		TeslaIdlePollInterval:     0, // poll every tick in tests
 		AmpsChangeThreshold:       0, // no hysteresis in legacy tests
@@ -881,4 +883,133 @@ func Test_Tick_noTeslaCallsWhenIdleNoSurplus(t *testing.T) {
 	if len(calls) != 0 {
 		t.Errorf("expected no Tesla API calls when idle with no surplus, got %v", calls)
 	}
+}
+
+func Test_Tick_skipsCommandsWhenDisconnected(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.ChargeStartRetry = 2 * time.Minute
+	cfg.CommandFailureBackoff = 5 * time.Minute
+
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 6000, GridWatts: -5000, SurplusWatts: 5000}}
+	// Car online + plugged in but Tesla reports Disconnected (cable not engaged).
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Disconnected"}}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+
+	// Run several ticks to ensure no command spam.
+	for i := 0; i < 5; i++ {
+		ctrl.Tick(context.Background())
+	}
+
+	for _, call := range veh.getCalls() {
+		if call != "" && (containsAny(call, "SetChargingAmps", "StartCharging")) {
+			t.Errorf("expected no charge commands while Disconnected, got %v", veh.getCalls())
+			break
+		}
+	}
+}
+
+func Test_Tick_skipsChargeStart_withinCooldown(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.ChargeStartRetry = 5 * time.Minute
+	cfg.CommandFailureBackoff = 0 // isolate ChargeStartRetry
+
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 6000, GridWatts: -5000, SurplusWatts: 5000}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"}}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+
+	// First tick: should attempt charge-start (SetChargingAmps + StartCharging).
+	ctrl.Tick(context.Background())
+	firstCalls := len(veh.getCalls())
+	if firstCalls == 0 {
+		t.Fatalf("expected first tick to send commands, got 0 calls")
+	}
+
+	// Subsequent ticks within cooldown: no additional commands.
+	for i := 0; i < 5; i++ {
+		ctrl.Tick(context.Background())
+	}
+	if got := len(veh.getCalls()); got != firstCalls {
+		t.Errorf("expected no additional commands within cooldown, got %d new (calls=%v)", got-firstCalls, veh.getCalls())
+	}
+}
+
+func Test_Tick_backsOffAfterCommandFailure(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.ChargeStartRetry = 0 // isolate failure backoff
+	cfg.CommandFailureBackoff = 5 * time.Minute
+
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 6000, GridWatts: -5000, SurplusWatts: 5000}}
+	veh := &mockVehicle{
+		chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"},
+		setAmpsErr:  errors.New("403 forbidden"),
+	}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+
+	// First tick: SetChargingAmps fails -> records failure, transitions to Error.
+	ctrl.Tick(context.Background())
+	firstCalls := len(veh.getCalls())
+	if firstCalls == 0 {
+		t.Fatalf("expected first tick to attempt SetChargingAmps")
+	}
+
+	// Subsequent ticks within failure backoff: must not retry.
+	for i := 0; i < 5; i++ {
+		ctrl.Tick(context.Background())
+	}
+	if got := len(veh.getCalls()); got != firstCalls {
+		t.Errorf("expected no retry within failure backoff, got %d new calls (calls=%v)", got-firstCalls, veh.getCalls())
+	}
+}
+
+func Test_Tick_clearsErrorAfterBackoff(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.CommandFailureBackoff = 1 * time.Millisecond
+
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 6000, GridWatts: -5000, SurplusWatts: 5000}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"}}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+
+	// Force the controller into StateError with an old failure timestamp.
+	ctrl.mu.Lock()
+	ctrl.state = StateError
+	ctrl.lastCommandFailure = time.Now().Add(-1 * time.Second)
+	ctrl.mu.Unlock()
+
+	ctrl.Tick(context.Background())
+
+	ctrl.mu.RLock()
+	got := ctrl.state
+	ctrl.mu.RUnlock()
+	if got == StateError {
+		t.Errorf("expected error state to auto-clear after backoff, still in %s", got)
+	}
+}
+
+func Test_isActionableNonChargingState(t *testing.T) {
+	cases := map[string]bool{
+		"Stopped":      true,
+		"NoPower":      true,
+		"":             true,
+		"Disconnected": false,
+		"Complete":     false,
+		"Starting":     false,
+		"Charging":     false,
+		"unknown":      false,
+	}
+	for state, want := range cases {
+		if got := isActionableNonChargingState(state); got != want {
+			t.Errorf("isActionableNonChargingState(%q)=%v want %v", state, got, want)
+		}
+	}
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+	}
+	return false
 }

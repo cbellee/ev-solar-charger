@@ -86,10 +86,12 @@ type Controller struct {
 	sessionAmpTotal int64
 	sessionSamples  int
 
-	lastTeslaPoll     time.Time
-	lastWakeAttempt   time.Time
-	cachedChargeState tesla.ChargeState
-	hasCachedState    bool
+	lastTeslaPoll          time.Time
+	lastWakeAttempt        time.Time
+	lastChargeStartAttempt time.Time
+	lastCommandFailure     time.Time
+	cachedChargeState      tesla.ChargeState
+	hasCachedState         bool
 
 	OnUpdate func(StateSnapshot)
 }
@@ -172,6 +174,11 @@ func (c *Controller) Tick(ctx context.Context) {
 		c.tickTestMode(ctx, power)
 		return
 	}
+
+	// Auto-clear StateError after the failure backoff has elapsed so the
+	// controller re-evaluates from a clean slate. Without this, the error
+	// state is sticky and hides the cause from the user.
+	c.maybeClearError(ctx)
 
 	// Step 2: Read vehicle state (cost-aware polling).
 	// Tesla Fleet API charges $0.002 per vehicle_data call. We only poll when
@@ -271,16 +278,25 @@ func (c *Controller) Tick(ctx context.Context) {
 		}
 
 		if chargeState.State != "Charging" {
-			if err := c.vehicle.SetChargingAmps(ctx, availableAmps); err != nil {
-				c.logger.WarnContext(ctx, "set amps before start failed", "error", err)
-				c.transitionTo(ctx, StateError, err.Error())
-			} else if err := c.vehicle.StartCharging(ctx); err != nil {
-				c.logger.WarnContext(ctx, "start charging failed", "error", err)
+			if !isActionableNonChargingState(chargeState.State) {
+				c.transitionTo(ctx, StateMonitoring, fmt.Sprintf("charge state %q is not actionable", chargeState.State))
+			} else if !c.canAttemptChargeStart() {
+				c.transitionTo(ctx, StateMonitoring, "waiting for charge-start cooldown")
 			} else {
-				c.transitionTo(ctx, StateCharging, fmt.Sprintf("started at %dA", availableAmps))
-				c.mu.Lock()
-				c.lastChargeAmps = availableAmps
-				c.mu.Unlock()
+				c.recordChargeStartAttempt()
+				if err := c.vehicle.SetChargingAmps(ctx, availableAmps); err != nil {
+					c.logger.WarnContext(ctx, "set amps before start failed", "error", err)
+					c.recordCommandFailure()
+					c.transitionTo(ctx, StateError, err.Error())
+				} else if err := c.vehicle.StartCharging(ctx); err != nil {
+					c.logger.WarnContext(ctx, "start charging failed", "error", err)
+					c.recordCommandFailure()
+				} else {
+					c.transitionTo(ctx, StateCharging, fmt.Sprintf("started at %dA", availableAmps))
+					c.mu.Lock()
+					c.lastChargeAmps = availableAmps
+					c.mu.Unlock()
+				}
 			}
 		} else {
 			c.mu.RLock()
@@ -294,9 +310,13 @@ func (c *Controller) Tick(ctx context.Context) {
 			if threshold < 1 {
 				threshold = 1
 			}
-			if ampsDiff >= threshold {
+			// Skip if amps are already at the target (defensive — handles
+			// the threshold=1 case where ampsDiff>=threshold can be true
+			// even though we just sent the same value).
+			if availableAmps != lastAmps && ampsDiff >= threshold {
 				if err := c.vehicle.SetChargingAmps(ctx, availableAmps); err != nil {
 					c.logger.WarnContext(ctx, "set amps failed", "error", err)
+					c.recordCommandFailure()
 				} else {
 					c.mu.Lock()
 					c.lastChargeAmps = availableAmps
@@ -316,6 +336,7 @@ func (c *Controller) Tick(ctx context.Context) {
 		if chargeState.State == "Charging" && lowCount >= c.cfg.DeadbandPolls {
 			if err := c.vehicle.StopCharging(ctx); err != nil {
 				c.logger.WarnContext(ctx, "stop charging failed", "error", err)
+				c.recordCommandFailure()
 			} else {
 				c.transitionTo(ctx, StateStoppedLowSurplus, "insufficient surplus")
 				c.mu.Lock()
@@ -447,6 +468,72 @@ func (c *Controller) updateKnownPlugState(cs tesla.ChargeState) {
 	c.mu.Unlock()
 }
 
+// isActionableNonChargingState reports whether a non-Charging Tesla
+// charging-state value warrants an attempt to start a charge. States like
+// "Disconnected" (cable not engaged) or "Complete" (battery full) cannot be
+// resolved by sending more commands, so we skip them to avoid API spam.
+func isActionableNonChargingState(s string) bool {
+	switch s {
+	case "Stopped", "NoPower", "":
+		return true
+	default:
+		// "Disconnected", "Complete", "Starting" and any other value fall
+		// through here. "Starting" is in-flight; the next poll will
+		// re-evaluate. Unknown states are treated as non-actionable to fail
+		// safe.
+		return false
+	}
+}
+
+// canAttemptChargeStart returns true if the cooldowns allow another
+// SetChargingAmps + StartCharging attempt right now.
+func (c *Controller) canAttemptChargeStart() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := time.Now()
+	if c.cfg.ChargeStartRetry > 0 && !c.lastChargeStartAttempt.IsZero() &&
+		now.Sub(c.lastChargeStartAttempt) < c.cfg.ChargeStartRetry {
+		return false
+	}
+	if c.cfg.CommandFailureBackoff > 0 && !c.lastCommandFailure.IsZero() &&
+		now.Sub(c.lastCommandFailure) < c.cfg.CommandFailureBackoff {
+		return false
+	}
+	return true
+}
+
+func (c *Controller) recordChargeStartAttempt() {
+	c.mu.Lock()
+	c.lastChargeStartAttempt = time.Now()
+	c.mu.Unlock()
+}
+
+func (c *Controller) recordCommandFailure() {
+	c.mu.Lock()
+	c.lastCommandFailure = time.Now()
+	c.mu.Unlock()
+}
+
+// maybeClearError auto-recovers from StateError once the failure backoff has
+// elapsed, transitioning back to StateMonitoring so the next tick re-evaluates
+// from a clean slate. The lastError string in the snapshot is preserved for
+// the UI by the snapshot updater.
+func (c *Controller) maybeClearError(ctx context.Context) {
+	c.mu.RLock()
+	state := c.state
+	lastFailure := c.lastCommandFailure
+	c.mu.RUnlock()
+	if state != StateError {
+		return
+	}
+	if c.cfg.CommandFailureBackoff <= 0 {
+		return
+	}
+	if lastFailure.IsZero() || time.Since(lastFailure) >= c.cfg.CommandFailureBackoff {
+		c.transitionTo(ctx, StateMonitoring, "auto-clearing error after backoff")
+	}
+}
+
 func (c *Controller) shouldAttemptWake() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -501,6 +588,14 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 		// Re-poll periodically to detect when the car comes online after a
 		// wake. Without this, the controller would stay stuck on cached state.
 		return now.Sub(lastPoll) >= c.cfg.WakeRetryInterval
+	case StateError:
+		// Poll periodically while in error so we can recover from transient
+		// failures (cable re-engaged, network blip, etc.) without acting on
+		// stale cached state.
+		if c.cfg.CommandFailureBackoff > 0 {
+			return now.Sub(lastPoll) >= c.cfg.CommandFailureBackoff
+		}
+		return now.Sub(lastPoll) >= c.cfg.TeslaIdlePollInterval
 	default:
 		surplusAmps := int(math.Floor(surplusWatts / float64(c.cfg.LineVoltage)))
 		if surplusAmps >= c.cfg.MinChargeAmps {

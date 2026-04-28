@@ -37,6 +37,8 @@ type Config struct {
 	WakeAllowedEndHour        int
 	WakeTimezone              *time.Location
 	PluggedInStaleAfter       time.Duration
+	ChargeStartRetry          time.Duration
+	CommandFailureBackoff     time.Duration
 	TeslaChargingPollInterval time.Duration
 	TeslaIdlePollInterval     time.Duration
 	AmpsChangeThreshold       int
@@ -226,6 +228,24 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: WAKE_TIMEZONE %q is invalid: %w", tzName, err)
 	}
 	cfg.WakeTimezone = loc
+
+	chargeStartRetrySec, err := envInt("CHARGE_START_RETRY_SECONDS", 120)
+	if err != nil {
+		return Config{}, err
+	}
+	if chargeStartRetrySec < 1 {
+		return Config{}, fmt.Errorf("config: CHARGE_START_RETRY_SECONDS must be >= 1, got %d", chargeStartRetrySec)
+	}
+	cfg.ChargeStartRetry = time.Duration(chargeStartRetrySec) * time.Second
+
+	commandFailureBackoffSec, err := envInt("COMMAND_FAILURE_BACKOFF_SECONDS", 300)
+	if err != nil {
+		return Config{}, err
+	}
+	if commandFailureBackoffSec < 1 {
+		return Config{}, fmt.Errorf("config: COMMAND_FAILURE_BACKOFF_SECONDS must be >= 1, got %d", commandFailureBackoffSec)
+	}
+	cfg.CommandFailureBackoff = time.Duration(commandFailureBackoffSec) * time.Second
 
 	teslaChargingSec, err := envInt("TESLA_CHARGING_POLL_SECONDS", 60)
 	if err != nil {
