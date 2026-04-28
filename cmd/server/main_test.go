@@ -93,8 +93,8 @@ func testConfig(port int) config.Config {
 		WakeThresholdPolls: 6,
 		HTTPHost:           "127.0.0.1",
 		HTTPPort:           port,
-		HTTPAuthUser:       "admin",
-		HTTPAuthPassword:   "secret",
+		EntraTenantID:      "00000000-0000-0000-0000-000000000001",
+		EntraClientID:      "00000000-0000-0000-0000-000000000002",
 		LogLevel:           slog.LevelInfo,
 		DBPath:             "/tmp/test.db",
 		DBRetentionDays:    365,
@@ -118,6 +118,9 @@ func testDeps(cfg config.Config) runtimeDeps {
 		},
 		newServer: web.NewServer,
 		newHub:    web.NewHub,
+		newAuthenticator: func(_ context.Context, _ web.EntraConfig) (web.Authenticator, error) {
+			return web.NoopAuthenticator{}, nil
+		},
 	}
 }
 

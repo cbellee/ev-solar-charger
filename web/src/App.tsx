@@ -5,6 +5,7 @@ import DashboardPage from "@/pages/DashboardPage";
 import HistoryPage from "@/pages/HistoryPage";
 import SessionsPage from "@/pages/SessionsPage";
 import EventsPage from "@/pages/EventsPage";
+import { SignOutButton } from "@/auth/AuthProvider";
 
 export default function App() {
   const { status, snapshot } = useStateStream();
@@ -46,18 +47,21 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
-          <div className="flex items-center gap-2 text-xs text-gray-400">
-            <span
-              className={clsx(
-                "h-2 w-2 rounded-full",
-                status === "open"
-                  ? "bg-green-400"
-                  : status === "error"
-                    ? "bg-red-500"
-                    : "bg-amber-400 animate-pulse",
-              )}
-            />
-            {status}
+          <div className="flex items-center gap-4 text-xs text-gray-400">
+            <span className="flex items-center gap-2">
+              <span
+                className={clsx(
+                  "h-2 w-2 rounded-full",
+                  status === "open"
+                    ? "bg-green-400"
+                    : status === "error"
+                      ? "bg-red-500"
+                      : "bg-amber-400 animate-pulse",
+                )}
+              />
+              {status}
+            </span>
+            <SignOutButton />
           </div>
         </div>
       </header>

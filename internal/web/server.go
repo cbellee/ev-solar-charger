@@ -1,7 +1,6 @@
 package web
 
 import (
-	"crypto/subtle"
 	"log/slog"
 	"net/http"
 
@@ -12,30 +11,27 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// AuthConfig configures HTTP basic authentication for the UI and API.
-type AuthConfig struct {
-	Username string
-	Password string
-}
-
 // NewServer creates an HTTP handler with all routes registered.
-func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logger *slog.Logger, auth AuthConfig, cfg config.Config, vehicle tesla.VehicleController) http.Handler {
-	privateMux := http.NewServeMux()
+//
+// Routing layout:
+//   - Public: /healthz, /.well-known/..., /auth/tesla*, the SPA bundle (/, /assets/*, /images/*).
+//     The SPA must load unauthenticated so its MSAL flow can present a sign-in
+//     prompt to first-time visitors.
+//   - Protected by `auth`: /api/* and /events (SSE). The React app attaches an
+//     ID token via Authorization: Bearer (or ?access_token= for SSE).
+func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logger *slog.Logger, auth Authenticator, cfg config.Config, vehicle tesla.VehicleController) http.Handler {
+	apiMux := http.NewServeMux()
 
-	privateMux.HandleFunc("GET /api/state", handleState(ctrl))
-	privateMux.Handle("GET /events", hub)
-	privateMux.HandleFunc("POST /api/control", handleControl(ctrl))
-	privateMux.HandleFunc("POST /api/mode", handleMode(ctrl))
-	privateMux.HandleFunc("GET /api/history", handleHistory(store))
-	privateMux.HandleFunc("GET /api/sessions", handleSessions(store))
-	privateMux.HandleFunc("GET /api/events", handleEvents(store))
-	privateMux.HandleFunc("GET /api/search", handleSearch(store))
-	privateMux.HandleFunc("GET /api/usage", handleAPIUsage(ctrl))
-	privateMux.HandleFunc("GET /api/usage/history", handleAPIUsageHistory(store))
-
-	// SPA fallback: any unmatched GET serves the React bundle (assets or
-	// index.html for client-side routes).
-	privateMux.Handle("GET /", spaHandler())
+	apiMux.HandleFunc("GET /api/state", handleState(ctrl))
+	apiMux.Handle("GET /events", hub)
+	apiMux.HandleFunc("POST /api/control", handleControl(ctrl))
+	apiMux.HandleFunc("POST /api/mode", handleMode(ctrl))
+	apiMux.HandleFunc("GET /api/history", handleHistory(store))
+	apiMux.HandleFunc("GET /api/sessions", handleSessions(store))
+	apiMux.HandleFunc("GET /api/events", handleEvents(store))
+	apiMux.HandleFunc("GET /api/search", handleSearch(store))
+	apiMux.HandleFunc("GET /api/usage", handleAPIUsage(ctrl))
+	apiMux.HandleFunc("GET /api/usage/history", handleAPIUsageHistory(store))
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", handleHealthz)
@@ -47,20 +43,13 @@ func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logge
 	rootMux.HandleFunc("GET /auth/tesla", oauth.handleOAuthStart)
 	rootMux.HandleFunc("GET /auth/tesla/callback", oauth.handleOAuthCallback)
 
-	rootMux.Handle("/", basicAuthMiddleware(otelhttp.NewHandler(privateMux, "solar-ev-charger"), auth))
+	// Protected API + SSE.
+	rootMux.Handle("/api/", auth.Middleware(otelhttp.NewHandler(apiMux, "solar-ev-charger-api")))
+	rootMux.Handle("/events", auth.Middleware(otelhttp.NewHandler(apiMux, "solar-ev-charger-events")))
+
+	// Public SPA bundle (index.html + /assets/*). The React app gates its
+	// own UI via MSAL and presents a sign-in prompt for unauthenticated users.
+	rootMux.Handle("/", spaHandler())
 
 	return rootMux
-}
-
-func basicAuthMiddleware(next http.Handler, auth AuthConfig) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		username, password, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(username), []byte(auth.Username)) != 1 || subtle.ConstantTimeCompare([]byte(password), []byte(auth.Password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="solar-ev-charger"`)
-			http.Error(w, "authorization required", http.StatusUnauthorized)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }

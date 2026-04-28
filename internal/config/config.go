@@ -49,8 +49,9 @@ type Config struct {
 	TLSCertDir                string
 	TLSPort                   int
 	HTTPChallengePort         int
-	HTTPAuthUser              string
-	HTTPAuthPassword          string
+	EntraTenantID             string
+	EntraClientID             string
+	EntraAllowedOIDs          []string
 	LogLevel                  slog.Level
 	DBPath                    string
 	DBRetentionDays           int
@@ -315,13 +316,20 @@ func Load() (Config, error) {
 		}
 	}
 
-	cfg.HTTPAuthUser, err = requireEnv("HTTP_AUTH_USER")
+	cfg.EntraTenantID, err = requireEnv("ENTRA_TENANT_ID")
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.HTTPAuthPassword, err = requireEnv("HTTP_AUTH_PASSWORD")
+	cfg.EntraClientID, err = requireEnv("ENTRA_CLIENT_ID")
 	if err != nil {
 		return Config{}, err
+	}
+	if raw := strings.TrimSpace(os.Getenv("ENTRA_ALLOWED_OIDS")); raw != "" {
+		for _, oid := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(oid); trimmed != "" {
+				cfg.EntraAllowedOIDs = append(cfg.EntraAllowedOIDs, trimmed)
+			}
+		}
 	}
 
 	cfg.LogLevel, err = parseLogLevel(envOrDefault("LOG_LEVEL", "info"))

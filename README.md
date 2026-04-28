@@ -92,7 +92,7 @@ The Docker build runs `npm run build` automatically in its first stage.
 ## Quick Start (Docker Compose)
 
 1. Copy environment template.
-2. Fill required values for Sungrow, Tesla OAuth, and auth credentials.
+2. Fill required values for Sungrow, Tesla OAuth, and Entra ID auth.
 3. Start the app.
 
 ```bash
@@ -144,6 +144,51 @@ For production OAuth callback validation, configure:
 - TESLA_REDIRECT_URI=https://<your-public-domain>/auth/tesla/callback
 
 The app can serve ACME challenges and HTTPS directly when ports are correctly forwarded.
+
+## Authentication (Microsoft Entra ID)
+
+The dashboard, API, and SSE stream are gated by Microsoft Entra ID. The React
+SPA performs an interactive sign-in via MSAL, then attaches the resulting ID
+token to every `/api/*` and `/events` request. The Go backend validates the
+token's signature, issuer, audience (`ENTRA_CLIENT_ID`), and tenant
+(`ENTRA_TENANT_ID`).
+
+### Required env vars
+
+Backend (`.env`):
+
+- `ENTRA_TENANT_ID`: directory (tenant) ID of your Entra tenant
+- `ENTRA_CLIENT_ID`: application (client) ID of the SPA registration
+- `ENTRA_ALLOWED_OIDS` (optional): comma-separated list of user `oid` claims
+  allowed to sign in. Leave empty to allow any user from the tenant.
+
+Frontend (`web/.env`):
+
+- `VITE_ENTRA_TENANT_ID`: same as `ENTRA_TENANT_ID`
+- `VITE_ENTRA_CLIENT_ID`: same as `ENTRA_CLIENT_ID`
+
+### Entra app registration setup
+
+In the Azure portal → Microsoft Entra ID → App registrations → your app:
+
+1. Authentication → Add a platform → **Single-page application**.
+2. Redirect URIs: add both
+   - `https://<your-public-domain>/`
+   - `http://localhost:5173/` (Vite dev server)
+3. Front-channel logout URL: `https://<your-public-domain>/`
+4. Implicit grant: leave both checkboxes unchecked (auth code + PKCE only).
+5. Supported account types: **Accounts in this organizational directory only**
+   (single tenant).
+
+No "Expose an API" step is needed — the backend validates the ID token
+audience, which is automatically the client ID for tokens minted for this app.
+
+### Restricting to a single user
+
+After your first successful sign-in, decode the `id_token` (e.g. via
+[jwt.io](https://jwt.io)) and copy the `oid` claim into
+`ENTRA_ALLOWED_OIDS`. Any other tenant user attempting to sign in will then
+receive a 403.
 
 ## API Endpoints (Summary)
 

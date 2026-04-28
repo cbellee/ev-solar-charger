@@ -18,8 +18,8 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
 	t.Setenv("OAUTH_STATE_HMAC_KEY", "test-hmac-key")
 	t.Setenv("TESLA_TOKEN_PATH", "/data/tesla-refresh-token")
-	t.Setenv("HTTP_AUTH_USER", "test-user")
-	t.Setenv("HTTP_AUTH_PASSWORD", "test-password")
+	t.Setenv("ENTRA_TENANT_ID", "00000000-0000-0000-0000-000000000001")
+	t.Setenv("ENTRA_CLIENT_ID", "00000000-0000-0000-0000-000000000002")
 }
 
 func Test_Load_allRequiredVarsSet(t *testing.T) {
@@ -119,8 +119,8 @@ func Test_Load_defaultsApplied(t *testing.T) {
 	if cfg.HTTPHost != "127.0.0.1" {
 		t.Errorf("HTTPHost = %q, want %q", cfg.HTTPHost, "127.0.0.1")
 	}
-	if cfg.HTTPAuthUser != "test-user" {
-		t.Errorf("HTTPAuthUser = %q, want %q", cfg.HTTPAuthUser, "test-user")
+	if cfg.EntraTenantID != "00000000-0000-0000-0000-000000000001" {
+		t.Errorf("EntraTenantID = %q, want test tenant", cfg.EntraTenantID)
 	}
 	if cfg.DBRetentionDays != 365 {
 		t.Errorf("DBRetentionDays = %d, want 365", cfg.DBRetentionDays)
@@ -195,7 +195,7 @@ func Test_Load_dbRetentionDaysCustom(t *testing.T) {
 	}
 }
 
-func Test_Load_missingHTTPAuthPassword(t *testing.T) {
+func Test_Load_missingEntraClientID(t *testing.T) {
 	t.Setenv("SUNGROW_HOST", "192.168.1.100")
 	t.Setenv("TESLA_CLIENT_ID", "test-client-id")
 	t.Setenv("TESLA_CLIENT_SECRET", "test-client-secret")
@@ -204,10 +204,12 @@ func Test_Load_missingHTTPAuthPassword(t *testing.T) {
 	t.Setenv("TESLA_VIN", "5YJ3E1EA0RF000000")
 	t.Setenv("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
 	t.Setenv("OAUTH_STATE_HMAC_KEY", "test-hmac-key")
+	t.Setenv("ENTRA_TENANT_ID", "00000000-0000-0000-0000-000000000001")
+	// ENTRA_CLIENT_ID intentionally unset.
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for missing HTTP_AUTH_PASSWORD")
+		t.Fatal("expected error for missing ENTRA_CLIENT_ID")
 	}
 }
 
@@ -266,8 +268,8 @@ func Test_Load_invalidHTTPPort(t *testing.T) {
 
 func Test_Load_testModeSkipsTeslaCredentials(t *testing.T) {
 	t.Setenv("SUNGROW_HOST", "192.168.1.100")
-	t.Setenv("HTTP_AUTH_USER", "test-user")
-	t.Setenv("HTTP_AUTH_PASSWORD", "test-password")
+	t.Setenv("ENTRA_TENANT_ID", "00000000-0000-0000-0000-000000000001")
+	t.Setenv("ENTRA_CLIENT_ID", "00000000-0000-0000-0000-000000000002")
 	t.Setenv("TESLA_TEST_MODE", "true")
 	// Tesla OAuth credentials are required even in test mode so the
 	// /auth/tesla bootstrap flow can run; only TESLA_VIN is optional.

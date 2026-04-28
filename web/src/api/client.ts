@@ -10,15 +10,36 @@ import type {
   StateSnapshot,
 } from "./types";
 
+// TokenGetter is supplied by the React tree (typically via useIdToken) so the
+// fetch helpers don't have to depend on MSAL directly. Returning null disables
+// the Authorization header (useful for tests).
+export type TokenGetter = () => Promise<string | null>;
+
+let getToken: TokenGetter = async () => null;
+
+export function setTokenGetter(fn: TokenGetter): void {
+  getToken = fn;
+}
+
+export function currentTokenGetter(): TokenGetter {
+  return getToken;
+}
+
 async function jsonFetch<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
+  const token = await getToken();
+  const baseHeaders: Record<string, string> = {
+    Accept: "application/json",
+    ...(init?.body ? { "Content-Type": "application/json" } : {}),
+    ...((init?.headers as Record<string, string> | undefined) ?? {}),
+  };
+  if (token) {
+    baseHeaders.Authorization = `Bearer ${token}`;
+  }
+
   const res = await fetch(input, {
     credentials: "same-origin",
     ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...(init?.headers ?? {}),
-    },
+    headers: baseHeaders,
   });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;

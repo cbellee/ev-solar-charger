@@ -22,11 +22,17 @@ func oauthTestConfig() config.Config {
 	}
 }
 
+// denyAuth always rejects with 401. Used to verify protected routes are
+// gated by the Authenticator the server is constructed with.
+var denyAuth = AuthenticatorFunc(func(_ http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
+})
+
 func Test_NewServer_requiresAuthForProtectedRoutes(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, AuthConfig{
-		Username: "admin",
-		Password: "secret",
-	}, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig(), &nullVehicle{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/state", nil)
 	w := httptest.NewRecorder()
@@ -41,10 +47,7 @@ func Test_NewServer_requiresAuthForProtectedRoutes(t *testing.T) {
 }
 
 func Test_NewServer_allowsHealthzWithoutAuth(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, AuthConfig{
-		Username: "admin",
-		Password: "secret",
-	}, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig(), &nullVehicle{})
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -56,13 +59,9 @@ func Test_NewServer_allowsHealthzWithoutAuth(t *testing.T) {
 }
 
 func Test_NewServer_allowsProtectedRoutesWithAuth(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, AuthConfig{
-		Username: "admin",
-		Password: "secret",
-	}, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, NoopAuthenticator{}, oauthTestConfig(), &nullVehicle{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/state", nil)
-	req.SetBasicAuth("admin", "secret")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -72,10 +71,7 @@ func Test_NewServer_allowsProtectedRoutesWithAuth(t *testing.T) {
 }
 
 func Test_NewServer_allowsOAuthStartWithoutAuth(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, AuthConfig{
-		Username: "admin",
-		Password: "secret",
-	}, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig(), &nullVehicle{})
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/tesla", nil)
 	w := httptest.NewRecorder()
@@ -87,10 +83,7 @@ func Test_NewServer_allowsOAuthStartWithoutAuth(t *testing.T) {
 }
 
 func Test_NewServer_allowsPublicKeyEndpointWithoutAuth(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, AuthConfig{
-		Username: "admin",
-		Password: "secret",
-	}, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig(), &nullVehicle{})
 
 	req := httptest.NewRequest(http.MethodGet, "/.well-known/appspecific/com.tesla.3p.public-key.pem", nil)
 	w := httptest.NewRecorder()

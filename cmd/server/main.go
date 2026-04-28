@@ -31,15 +31,16 @@ import (
 )
 
 type runtimeDeps struct {
-	loadConfig   func() (config.Config, error)
-	setupOTelSDK func(context.Context, string, string) (func(context.Context) error, error)
-	newLogger    func(string, slog.Level) *slog.Logger
-	newMetrics   func() (*observability.Metrics, error)
-	newStore     func(string, *slog.Logger) (storage.Store, error)
-	newInverter  func(string, int, *slog.Logger, *observability.Metrics) inverter.InverterReader
-	newVehicle   func(config.Config, *slog.Logger, *observability.Metrics) (tesla.VehicleController, error)
-	newServer    func(*controller.Controller, storage.Store, *web.Hub, *slog.Logger, web.AuthConfig, config.Config, tesla.VehicleController) http.Handler
-	newHub       func(*slog.Logger) *web.Hub
+	loadConfig       func() (config.Config, error)
+	setupOTelSDK     func(context.Context, string, string) (func(context.Context) error, error)
+	newLogger        func(string, slog.Level) *slog.Logger
+	newMetrics       func() (*observability.Metrics, error)
+	newStore         func(string, *slog.Logger) (storage.Store, error)
+	newInverter      func(string, int, *slog.Logger, *observability.Metrics) inverter.InverterReader
+	newVehicle       func(config.Config, *slog.Logger, *observability.Metrics) (tesla.VehicleController, error)
+	newServer        func(*controller.Controller, storage.Store, *web.Hub, *slog.Logger, web.Authenticator, config.Config, tesla.VehicleController) http.Handler
+	newHub           func(*slog.Logger) *web.Hub
+	newAuthenticator func(context.Context, web.EntraConfig) (web.Authenticator, error)
 }
 
 func defaultRuntimeDeps() runtimeDeps {
@@ -59,6 +60,9 @@ func defaultRuntimeDeps() runtimeDeps {
 		},
 		newServer: web.NewServer,
 		newHub:    web.NewHub,
+		newAuthenticator: func(ctx context.Context, cfg web.EntraConfig) (web.Authenticator, error) {
+			return web.NewEntraAuthenticator(ctx, cfg)
+		},
 	}
 }
 
@@ -206,11 +210,21 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	hub := deps.newHub(logger)
 	ctrl.OnUpdate = hub.Broadcast
 
-	// 10. Create web server.
-	handler := deps.newServer(ctrl, store, hub, logger, web.AuthConfig{
-		Username: cfg.HTTPAuthUser,
-		Password: cfg.HTTPAuthPassword,
-	}, cfg, vehicle)
+	// 10. Create Entra ID authenticator (validates ID tokens on /api/* and /events).
+	authCtx, authCancel := context.WithTimeout(ctx, web.HealthCheckTimeout)
+	authenticator, err := deps.newAuthenticator(authCtx, web.EntraConfig{
+		TenantID:    cfg.EntraTenantID,
+		ClientID:    cfg.EntraClientID,
+		AllowedOIDs: cfg.EntraAllowedOIDs,
+		Logger:      logger,
+	})
+	authCancel()
+	if err != nil {
+		return fmt.Errorf("failed to initialize Entra authenticator: %w", err)
+	}
+
+	// 11. Create web server.
+	handler := deps.newServer(ctrl, store, hub, logger, authenticator, cfg, vehicle)
 
 	// 11. Start controller loop.
 	go ctrl.Run(ctx)
