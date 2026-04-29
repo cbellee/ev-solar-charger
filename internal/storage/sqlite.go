@@ -163,21 +163,7 @@ func (s *SQLiteStore) QueryReadings(ctx context.Context, f ReadingFilter) ([]Rea
 			return nil, fmt.Errorf("storage: scan reading: %w", err)
 		}
 		if ts.Valid {
-			for _, layout := range []string{
-				time.RFC3339Nano,
-				time.RFC3339,
-				"2006-01-02T15:04:05Z",
-				"2006-01-02 15:04:05",
-				"2006-01-02 15:04",
-				"2006-01-02",
-				"2006-01-02 15:04:05-07:00",
-				"2006-01-02T15:04:05.999999999-07:00",
-			} {
-				if t, err := time.Parse(layout, ts.String); err == nil {
-					r.Timestamp = t
-					break
-				}
-			}
+			r.Timestamp = parseStoredTime(ts.String)
 		}
 		readings = append(readings, r)
 	}
@@ -230,9 +216,9 @@ func (s *SQLiteStore) QuerySessions(ctx context.Context, from, to time.Time, lim
 			&cs.EndBattery, &cs.EnergyKWh, &cs.PeakAmps, &cs.AvgAmps); err != nil {
 			return nil, fmt.Errorf("storage: scan session: %w", err)
 		}
-		cs.StartTime, _ = time.Parse("2006-01-02 15:04:05", startStr)
+		cs.StartTime = parseStoredTime(startStr)
 		if endStr.Valid && endStr.String != "" {
-			cs.EndTime, _ = time.Parse("2006-01-02 15:04:05", endStr.String)
+			cs.EndTime = parseStoredTime(endStr.String)
 		}
 		sessions = append(sessions, cs)
 	}
@@ -286,13 +272,38 @@ func (s *SQLiteStore) QueryEvents(ctx context.Context, from, to time.Time, event
 		if err := rows.Scan(&e.ID, &ts, &e.Type, &e.Message, &e.Details); err != nil {
 			return nil, fmt.Errorf("storage: scan event: %w", err)
 		}
-		e.Timestamp, _ = time.Parse("2006-01-02 15:04:05", ts)
+		e.Timestamp = parseStoredTime(ts)
 		events = append(events, e)
 	}
 	if events == nil {
 		events = []Event{}
 	}
 	return events, rows.Err()
+}
+
+// parseStoredTime parses a timestamp string read from SQLite, trying the
+// formats commonly produced by the driver and our own writes. Returns the
+// zero time if no layout matches.
+func parseStoredTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05.999999999 -07:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05.999999999Z",
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04",
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // sanitizeFTS5Query strips characters that could cause FTS5 syntax errors.
@@ -334,7 +345,7 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, from, to time.Ti
 		if err := rows.Scan(&e.ID, &ts, &e.Type, &e.Message, &e.Details); err != nil {
 			return nil, fmt.Errorf("storage: scan search result: %w", err)
 		}
-		e.Timestamp, _ = time.Parse("2006-01-02 15:04:05", ts)
+		e.Timestamp = parseStoredTime(ts)
 		events = append(events, e)
 	}
 	if events == nil {
@@ -375,7 +386,7 @@ func (s *SQLiteStore) QueryAPIUsage(ctx context.Context, from, to time.Time, lim
 		if err := rows.Scan(&s.ID, &ts, &s.DataCalls, &s.CommandCalls, &s.WakeCalls, &s.StreamSignals, &s.EstimatedCost); err != nil {
 			return nil, fmt.Errorf("storage: scan api usage: %w", err)
 		}
-		s.Timestamp, _ = time.Parse("2006-01-02 15:04:05", ts)
+		s.Timestamp = parseStoredTime(ts)
 		snapshots = append(snapshots, s)
 	}
 	if snapshots == nil {
