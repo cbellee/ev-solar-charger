@@ -237,7 +237,7 @@ func (c *Controller) Tick(ctx context.Context) {
 	}
 
 	// Step 5: Calculate available amps.
-	availableAmps := c.calculateAvailableAmps(power.SurplusWatts, chargeState)
+	availableAmps := c.calculateAvailableAmps(power.SurplusWatts, power.GridWatts, chargeState)
 
 	// Step 6: State machine decision.
 	if availableAmps >= c.cfg.MinChargeAmps {
@@ -362,7 +362,7 @@ func (c *Controller) Tick(ctx context.Context) {
 }
 
 func (c *Controller) tickTestMode(ctx context.Context, power inverter.PowerData) {
-	availableAmps := c.calculateAvailableAmps(power.SurplusWatts, tesla.ChargeState{})
+	availableAmps := c.calculateAvailableAmps(power.SurplusWatts, power.GridWatts, tesla.ChargeState{})
 	chargeState := tesla.ChargeState{State: "Projected only"}
 
 	if availableAmps >= c.cfg.MinChargeAmps {
@@ -384,10 +384,17 @@ func (c *Controller) tickTestMode(ctx context.Context, power inverter.PowerData)
 	}
 }
 
-func (c *Controller) calculateAvailableAmps(surplusWatts float64, cs tesla.ChargeState) int {
-	surplusAmps := int(math.Floor(surplusWatts / float64(c.cfg.LineVoltage)))
+func (c *Controller) calculateAvailableAmps(surplusWatts, gridWatts float64, cs tesla.ChargeState) int {
+	var surplusAmps int
 	if cs.State == "Charging" {
-		surplusAmps += cs.AmpsActual
+		// When already charging, use the signed grid balance so we throttle
+		// down when the EV is causing import. Available draw is what the EV
+		// is currently pulling minus whatever we're importing from the grid.
+		// gridWatts is positive when importing, negative when exporting.
+		netWatts := -gridWatts
+		surplusAmps = int(math.Floor(netWatts/float64(c.cfg.LineVoltage))) + cs.AmpsActual
+	} else {
+		surplusAmps = int(math.Floor(surplusWatts / float64(c.cfg.LineVoltage)))
 	}
 	if surplusAmps < 0 {
 		surplusAmps = 0

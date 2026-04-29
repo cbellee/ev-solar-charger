@@ -393,19 +393,21 @@ func Test_calculateAvailableAmps(t *testing.T) {
 	tests := []struct {
 		name     string
 		surplusW float64
+		gridW    float64
 		charging bool
 		carAmps  int
 		wantAmps int
 	}{
-		{"2400W no car", 2400, false, 0, 10},
-		{"2400W car at 10A", 2400, true, 10, 20},
-		{"1199W below min", 1199, false, 0, 4},
-		{"1200W exactly min", 1200, false, 0, 5},
-		{"7680W at max", 7680, false, 0, 32},
-		{"9600W above max", 9600, false, 0, 32},
-		{"0W no car", 0, false, 0, 0},
-		{"0W car at 10A", 0, true, 10, 10},
-		{"-500W car at 10A", 0, true, 10, 10},
+		{"2400W no car", 2400, -2400, false, 0, 10},
+		{"2400W car at 10A", 2400, -2400, true, 10, 20},
+		{"1199W below min", 1199, -1199, false, 0, 4},
+		{"1200W exactly min", 1200, -1200, false, 0, 5},
+		{"7680W at max", 7680, -7680, false, 0, 32},
+		{"9600W above max", 9600, -9600, false, 0, 32},
+		{"0W no car", 0, 0, false, 0, 0},
+		{"0W car at 10A", 0, 0, true, 10, 10},
+		{"-500W car at 10A", 0, 500, true, 10, 7},
+		{"importing 4000W car at 32A throttles", 0, 4000, true, 32, 15},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -414,10 +416,10 @@ func Test_calculateAvailableAmps(t *testing.T) {
 			if tt.charging {
 				cs.State = "Charging"
 			}
-			got := ctrl.calculateAvailableAmps(tt.surplusW, cs)
+			got := ctrl.calculateAvailableAmps(tt.surplusW, tt.gridW, cs)
 			if got != tt.wantAmps {
-				t.Errorf("calculateAvailableAmps(%f, charging=%v, carAmps=%d) = %d, want %d",
-					tt.surplusW, tt.charging, tt.carAmps, got, tt.wantAmps)
+				t.Errorf("calculateAvailableAmps(surplus=%f, grid=%f, charging=%v, carAmps=%d) = %d, want %d",
+					tt.surplusW, tt.gridW, tt.charging, tt.carAmps, got, tt.wantAmps)
 			}
 		})
 	}
