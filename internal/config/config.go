@@ -25,6 +25,8 @@ type Config struct {
 	OAuthStateHMACKey         string
 	TeslaTokenPath            string
 	TeslaRegion               string
+	TeslaCommandBase          string
+	TeslaProxyCAFile          string
 	TeslaTestMode             bool
 	PollInterval              time.Duration
 	MinChargeAmps             int
@@ -86,6 +88,8 @@ func Load() (Config, error) {
 	cfg.OAuthStateHMACKey = envOrDefault("OAUTH_STATE_HMAC_KEY", "")
 	cfg.TeslaTokenPath = envOrDefault("TESLA_TOKEN_PATH", "/data/tesla-refresh-token")
 	cfg.TeslaRegion = envOrDefault("TESLA_REGION", "na")
+	cfg.TeslaCommandBase = envOrDefault("TESLA_COMMAND_BASE", "")
+	cfg.TeslaProxyCAFile = envOrDefault("TESLA_PROXY_CA_FILE", "")
 	cfg.TeslaRedirectURI = envOrDefault("TESLA_REDIRECT_URI", "")
 	cfg.TeslaScope = envOrDefault("TESLA_SCOPE", "openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds")
 

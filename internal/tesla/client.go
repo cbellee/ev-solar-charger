@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -34,7 +35,9 @@ const authURL = "https://fleet-auth.prd.vn.cloud.tesla.com"
 // TeslaClient implements VehicleController using the Tesla Fleet API.
 type TeslaClient struct {
 	httpClient   *http.Client
+	cmdClient    *http.Client
 	baseURL      string
+	cmdBaseURL   string
 	authURL      string
 	vin          string
 	clientID     string
@@ -90,11 +93,47 @@ func New(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics)
 		usage:        NewAPIUsageTracker(),
 	}
 
+	// Tesla Vehicle Command Protocol: routes commands (charge_start,
+	// charge_stop, set_charging_amps, wake_up) through tesla-http-proxy when
+	// TESLA_COMMAND_BASE is set. The proxy signs payloads with the fleet
+	// private key and forwards to Fleet API. Data endpoints stay on the
+	// regional Fleet API base URL.
+	c.cmdBaseURL = baseURL
+	c.cmdClient = c.httpClient
+	if cfg.TeslaCommandBase != "" {
+		c.cmdBaseURL = strings.TrimRight(cfg.TeslaCommandBase, "/")
+		cmdHTTP, err := buildCommandHTTPClient(cfg.TeslaProxyCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("tesla: build command client: %w", err)
+		}
+		c.cmdClient = cmdHTTP
+		logger.Info("tesla: vehicle command protocol enabled", "base", c.cmdBaseURL)
+	}
+
 	if err := c.refreshAccessToken(context.Background()); err != nil {
 		return nil, fmt.Errorf("tesla: initial token refresh: %w", err)
 	}
 
 	return c, nil
+}
+
+// buildCommandHTTPClient creates an HTTP client that trusts the proxy's
+// (typically self-signed) TLS cert. The proxy refuses to start without TLS,
+// so plain http:// is not supported.
+func buildCommandHTTPClient(caFile string) (*http.Client, error) {
+	tr := &http.Transport{}
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read ca file %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("no certificates parsed from %q", caFile)
+		}
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	}
+	return &http.Client{Timeout: 30 * time.Second, Transport: tr}, nil
 }
 
 func (c *TeslaClient) refreshAccessToken(ctx context.Context) error {
@@ -147,6 +186,21 @@ func (c *TeslaClient) refreshAccessToken(ctx context.Context) error {
 	return nil
 }
 
+// routeFor selects the HTTP client and base URL for a given API path.
+// Command paths (signed by tesla-http-proxy) and wake_up go through the
+// command client when configured; everything else uses the regional Fleet
+// API directly.
+func (c *TeslaClient) routeFor(path string) (*http.Client, string) {
+	if c.cmdBaseURL != "" && c.cmdBaseURL != c.baseURL && isCommandPath(path) {
+		return c.cmdClient, c.cmdBaseURL
+	}
+	return c.httpClient, c.baseURL
+}
+
+func isCommandPath(path string) bool {
+	return strings.Contains(path, "/command/") || strings.HasSuffix(path, "/wake_up")
+}
+
 func (c *TeslaClient) doRequest(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	c.mu.Lock()
 	if time.Now().After(c.tokenExpiry.Add(-60 * time.Second)) {
@@ -167,7 +221,9 @@ func (c *TeslaClient) doRequest(ctx context.Context, method, path string, body a
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(payload))
+	httpClient, baseURL := c.routeFor(path)
+
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("tesla: build request: %w", err)
 	}
@@ -183,7 +239,7 @@ func (c *TeslaClient) doRequest(ctx context.Context, method, path string, body a
 		}
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("tesla: %s %s: %w", method, path, err)
 	}
@@ -193,7 +249,7 @@ func (c *TeslaClient) doRequest(ctx context.Context, method, path string, body a
 		if err := c.refreshAccessToken(ctx); err != nil {
 			return nil, err
 		}
-		req, err = http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(payload))
+		req, err = http.NewRequestWithContext(ctx, method, baseURL+path, bytes.NewReader(payload))
 		if err != nil {
 			return nil, fmt.Errorf("tesla: rebuild request: %w", err)
 		}
@@ -206,7 +262,7 @@ func (c *TeslaClient) doRequest(ctx context.Context, method, path string, body a
 				return io.NopCloser(bytes.NewReader(payload)), nil
 			}
 		}
-		resp, err = c.httpClient.Do(req)
+		resp, err = httpClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("tesla: %s %s retry: %w", method, path, err)
 		}

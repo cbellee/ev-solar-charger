@@ -27,6 +27,31 @@ Solar EV Charger Controller monitors Sungrow inverter surplus power and automati
 - Refresh token persistence to file and runtime token activation after callback.
 - Public well-known endpoint for Tesla app/domain key verification.
 
+### Tesla Vehicle Command Protocol
+
+Tesla deprecated REST `command/*` endpoints for 2021+ Model 3/Y/S/X. Charging
+commands now require requests to be signed with your fleet private key and
+routed through the [tesla-http-proxy](https://github.com/teslamotors/vehicle-command).
+The repo's `docker-compose.yml` runs the proxy as a sidecar; the app routes
+`charge_start`, `charge_stop`, `set_charging_amps`, and `wake_up` to it via
+`TESLA_COMMAND_BASE`. Data endpoints (`vehicle_data`, etc.) continue to use
+the regional Fleet API directly.
+
+One-time TLS cert generation for the proxy (run from the repo root):
+
+```bash
+openssl req -x509 -nodes -newkey ec \
+  -pkeyopt ec_paramgen_curve:secp384r1 -pkeyopt ec_param_enc:named_curve \
+  -subj '/CN=tesla-http-proxy' \
+  -addext "subjectAltName=DNS:tesla-http-proxy,DNS:localhost,IP:127.0.0.1" \
+  -addext "extendedKeyUsage=serverAuth" \
+  -addext "keyUsage=digitalSignature,keyCertSign,keyAgreement" \
+  -keyout secrets/proxy-tls-key.pem -out secrets/proxy-tls-cert.pem \
+  -sha256 -days 3650
+```
+
+The proxy's TLS key MUST be different from `fleet-key.pem`.
+
 ### Web UI and APIs
 
 - Live dashboard with SSE updates.

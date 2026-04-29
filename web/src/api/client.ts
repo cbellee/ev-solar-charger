@@ -66,6 +66,10 @@ export const api = {
     });
   },
 
+  forceRefresh(): Promise<{ result: string }> {
+    return jsonFetch("/api/refresh", { method: "POST" });
+  },
+
   control(action: ControlAction, amps?: number): Promise<{ result: string }> {
     const body: Record<string, unknown> = { action };
     if (typeof amps === "number") body.amps = amps;
@@ -92,6 +96,10 @@ export const api = {
 
   searchEvents(q: string): Promise<EventRecord[]> {
     return jsonFetch<EventRecord[]>(`/api/search?q=${encodeURIComponent(q)}`);
+  },
+
+  listEvents(limit = 100): Promise<EventRecord[]> {
+    return jsonFetch<EventRecord[]>(`/api/events?limit=${limit}`);
   },
 
   getAPIUsage(): Promise<APIUsageResponse> {

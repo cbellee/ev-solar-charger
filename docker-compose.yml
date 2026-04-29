@@ -1,4 +1,17 @@
 services:
+  tesla-http-proxy:
+    image: tesla/vehicle-command:latest
+    command:
+      - tesla-http-proxy
+      - -tls-key=/secrets/proxy-tls-key.pem
+      - -cert=/secrets/proxy-tls-cert.pem
+      - -key-file=/secrets/fleet-key.pem
+      - -host=0.0.0.0
+      - -port=4443
+    volumes:
+      - ./secrets:/secrets:ro
+    restart: unless-stopped
+
   solar-ev-charger:
     build: .
     ports:
@@ -10,10 +23,14 @@ services:
       OTEL_TRACES_EXPORTER: none
       OTEL_METRICS_EXPORTER: none
       OTEL_LOGS_EXPORTER: none
+      TESLA_COMMAND_BASE: https://tesla-http-proxy:4443
+      TESLA_PROXY_CA_FILE: /secrets/proxy-tls-cert.pem
     volumes:
       - ./secrets:/secrets:ro
       - solar-data:/data
     restart: unless-stopped
+    depends_on:
+      - tesla-http-proxy
     healthcheck:
       test: ["CMD", "/solar-ev-charger", "healthcheck"]
       interval: 30s

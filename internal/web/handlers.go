@@ -141,6 +141,14 @@ type modeRequest struct {
 	Mode string `json:"mode"`
 }
 
+func handleRefresh(ctrl *controller.Controller) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctrl.ForceRefresh(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"result":"ok"}`))
+	}
+}
+
 func handleMode(ctrl *controller.Controller) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireJSON(w, r) {

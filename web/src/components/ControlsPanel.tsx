@@ -30,21 +30,41 @@ export function ControlsPanel({ snap }: Props) {
     onSuccess: () => setError(null),
   });
 
+  const refresh = useMutation({
+    mutationFn: () => api.forceRefresh(),
+    onError: (e) => setError((e as Error).message),
+    onSuccess: () => {
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["state"] });
+    },
+  });
+
   const isManual = snap.mode === "manual";
-  const busy = setMode.isPending || control.isPending;
+  const busy = setMode.isPending || control.isPending || refresh.isPending;
 
   return (
     <Card title="Controls">
       <div className="space-y-4">
         <div>
           <div className="text-xs text-gray-400 mb-1.5">Mode</div>
-          <div className="inline-flex rounded-md border border-gray-700 overflow-hidden">
-            <ModeBtn active={!isManual} onClick={() => setMode.mutate("auto")} disabled={busy}>
-              Auto
-            </ModeBtn>
-            <ModeBtn active={isManual} onClick={() => setMode.mutate("manual")} disabled={busy}>
-              Manual
-            </ModeBtn>
+          <div className="flex items-center gap-2">
+            <div className="inline-flex rounded-md border border-gray-700 overflow-hidden">
+              <ModeBtn active={!isManual} onClick={() => setMode.mutate("auto")} disabled={busy}>
+                Auto
+              </ModeBtn>
+              <ModeBtn active={isManual} onClick={() => setMode.mutate("manual")} disabled={busy}>
+                Manual
+              </ModeBtn>
+            </div>
+            <button
+              type="button"
+              className="rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 px-3 py-1.5 text-sm font-medium text-gray-200"
+              disabled={busy}
+              onClick={() => refresh.mutate()}
+              title="Clear cooldowns and re-poll Tesla immediately"
+            >
+              {refresh.isPending ? "Refreshing…" : "Force refresh"}
+            </button>
           </div>
         </div>
 

@@ -14,7 +14,8 @@ export default function EventsPage() {
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["events", debounced],
-    queryFn: () => api.searchEvents(debounced),
+    queryFn: () =>
+      debounced ? api.searchEvents(debounced) : api.listEvents(100),
     enabled: true,
   });
 

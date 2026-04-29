@@ -291,6 +291,7 @@ func (c *Controller) Tick(ctx context.Context) {
 				} else if err := c.vehicle.StartCharging(ctx); err != nil {
 					c.logger.WarnContext(ctx, "start charging failed", "error", err)
 					c.recordCommandFailure()
+					c.transitionTo(ctx, StateError, err.Error())
 				} else {
 					c.transitionTo(ctx, StateCharging, fmt.Sprintf("started at %dA", availableAmps))
 					c.mu.Lock()
@@ -772,6 +773,29 @@ func (c *Controller) SetMode(mode Mode) {
 	c.mode = mode
 	c.snapshot.Mode = mode
 	c.mu.Unlock()
+}
+
+// ForceRefresh clears cached charge state and the command-failure /
+// charge-start cooldowns, then runs a Tick immediately. Used by the dashboard
+// "Force refresh" button to break out of MONITORING / WAKE_PENDING after an
+// external state change (e.g. another app released control of the vehicle).
+func (c *Controller) ForceRefresh(ctx context.Context) {
+	c.mu.Lock()
+	c.hasCachedState = false
+	c.cachedChargeState = tesla.ChargeState{}
+	c.lastTeslaPoll = time.Time{}
+	c.lastWakeAttempt = time.Time{}
+	c.lastChargeStartAttempt = time.Time{}
+	c.lastCommandFailure = time.Time{}
+	c.consecutiveLow = 0
+	c.consecutiveSurplus = 0
+	if c.state == StateError {
+		c.state = StateMonitoring
+		c.snapshot.State = StateMonitoring
+	}
+	c.mu.Unlock()
+	c.logger.InfoContext(ctx, "force refresh requested")
+	c.Tick(ctx)
 }
 
 // ManualSetAmps sets charging amps (manual mode only).
