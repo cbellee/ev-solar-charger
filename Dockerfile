@@ -7,6 +7,12 @@ WORKDIR /src/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
+# Vite inlines VITE_-prefixed env vars at build time. These IDs are public
+# (they ship to every browser) so it's safe to set them via build args.
+ARG VITE_ENTRA_TENANT_ID
+ARG VITE_ENTRA_CLIENT_ID
+ENV VITE_ENTRA_TENANT_ID=${VITE_ENTRA_TENANT_ID}
+ENV VITE_ENTRA_CLIENT_ID=${VITE_ENTRA_CLIENT_ID}
 # Vite writes to ../internal/web/dist (see vite.config.ts).
 RUN mkdir -p /src/internal/web && npm run build
 
