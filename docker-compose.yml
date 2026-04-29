@@ -2,7 +2,6 @@ services:
   tesla-http-proxy:
     image: tesla/vehicle-command:latest
     command:
-      - tesla-http-proxy
       - -tls-key=/secrets/proxy-tls-key.pem
       - -cert=/secrets/proxy-tls-cert.pem
       - -key-file=/secrets/fleet-key.pem
