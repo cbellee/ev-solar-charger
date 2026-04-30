@@ -5,6 +5,7 @@ import DashboardPage from "@/pages/DashboardPage";
 import HistoryPage from "@/pages/HistoryPage";
 import SessionsPage from "@/pages/SessionsPage";
 import EventsPage from "@/pages/EventsPage";
+import UsagePage from "@/pages/UsagePage";
 import { SignOutButton } from "@/auth/AuthProvider";
 
 export default function App() {
@@ -29,6 +30,7 @@ export default function App() {
               { to: "/history", label: "History" },
               { to: "/sessions", label: "Sessions" },
               { to: "/events", label: "Events" },
+              { to: "/usage", label: "Usage" },
             ].map(({ to, label, end }) => (
               <NavLink
                 key={to}
@@ -72,6 +74,7 @@ export default function App() {
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/events" element={<EventsPage />} />
+          <Route path="/usage" element={<UsagePage />} />
           <Route path="*" element={<DashboardPage />} />
         </Routes>
       </main>
