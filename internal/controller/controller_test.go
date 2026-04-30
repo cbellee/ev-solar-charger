@@ -721,7 +721,10 @@ func Test_shouldPollTesla_chargingRespectsInterval(t *testing.T) {
 	}
 }
 
-func Test_shouldPollTesla_idleNoSurplusSkipsPoll(t *testing.T) {
+func Test_shouldPollTesla_idleNoSurplusStillPollsAfterInterval(t *testing.T) {
+	// We poll on the idle interval regardless of surplus, so we can detect
+	// out-of-band charge starts (e.g. user starts charging from the Tesla
+	// app) and react with StopCharging.
 	cfg := defaultCfg()
 	cfg.TeslaIdlePollInterval = 300 * time.Second
 	ctrl := newTestControllerWithConfig(&mockInverter{}, &mockVehicle{}, &mockStore{}, cfg)
@@ -731,8 +734,23 @@ func Test_shouldPollTesla_idleNoSurplusSkipsPoll(t *testing.T) {
 	ctrl.lastTeslaPoll = time.Now().Add(-10 * time.Minute)
 	ctrl.mu.Unlock()
 
+	if !ctrl.shouldPollTesla(0) {
+		t.Error("shouldPollTesla = false after idle interval elapsed, want true")
+	}
+}
+
+func Test_shouldPollTesla_idleNoSurplusFreshCacheSkipsPoll(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.TeslaIdlePollInterval = 300 * time.Second
+	ctrl := newTestControllerWithConfig(&mockInverter{}, &mockVehicle{}, &mockStore{}, cfg)
+	ctrl.mu.Lock()
+	ctrl.state = StateIdle
+	ctrl.hasCachedState = true
+	ctrl.lastTeslaPoll = time.Now().Add(-30 * time.Second)
+	ctrl.mu.Unlock()
+
 	if ctrl.shouldPollTesla(0) {
-		t.Error("shouldPollTesla = true with no surplus and idle, want false")
+		t.Error("shouldPollTesla = true within idle interval, want false")
 	}
 }
 

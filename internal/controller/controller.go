@@ -640,11 +640,12 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 		}
 		return now.Sub(lastPoll) >= c.cfg.TeslaIdlePollInterval
 	default:
-		surplusAmps := int(math.Floor(surplusWatts / float64(c.cfg.LineVoltage)))
-		if surplusAmps >= c.cfg.MinChargeAmps {
-			return now.Sub(lastPoll) >= c.cfg.TeslaIdlePollInterval
-		}
-		return false
+		// Always poll on the idle interval (default 5 min) so we detect
+		// out-of-band state changes — e.g. the user starts a charge from
+		// the Tesla app, or a scheduled charge fires. Without this, a
+		// cached "Stopped" state can keep us from ever issuing StopCharging
+		// while the car silently draws from the grid.
+		return now.Sub(lastPoll) >= c.cfg.TeslaIdlePollInterval
 	}
 }
 
