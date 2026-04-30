@@ -300,6 +300,9 @@ func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
 				BatteryLevel       float64 `json:"battery_level"`
 				ChargePortDoorOpen bool    `json:"charge_port_door_open"`
 				ChargePortLatch    string  `json:"charge_port_latch"`
+				ChargeLimitSOC     int     `json:"charge_limit_soc"`
+				ChargeLimitSOCMin  int     `json:"charge_limit_soc_min"`
+				ChargeLimitSOCMax  int     `json:"charge_limit_soc_max"`
 			} `json:"charge_state"`
 			State string `json:"state"`
 		} `json:"response"`
@@ -316,11 +319,14 @@ func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
 	chargingState := result.Response.ChargeState.ChargingState
 	latchEngaged := result.Response.ChargeState.ChargePortLatch == "Engaged"
 	cs := ChargeState{
-		State:      chargingState,
-		AmpsActual: result.Response.ChargeState.ChargeAmps,
-		BatteryPct: result.Response.ChargeState.BatteryLevel,
-		PluggedIn:  latchEngaged && chargingState != "Disconnected",
-		IsOnline:   result.Response.State == "online",
+		State:          chargingState,
+		AmpsActual:     result.Response.ChargeState.ChargeAmps,
+		BatteryPct:     result.Response.ChargeState.BatteryLevel,
+		PluggedIn:      latchEngaged && chargingState != "Disconnected",
+		IsOnline:       result.Response.State == "online",
+		ChargeLimit:    result.Response.ChargeState.ChargeLimitSOC,
+		ChargeLimitMin: result.Response.ChargeState.ChargeLimitSOCMin,
+		ChargeLimitMax: result.Response.ChargeState.ChargeLimitSOCMax,
 	}
 
 	if c.metrics != nil {
@@ -351,6 +357,33 @@ func (c *TeslaClient) SetChargingAmps(ctx context.Context, amps int) error {
 
 	if c.metrics != nil {
 		c.metrics.ChargeCommands.Add(ctx, 1, metric.WithAttributes(attribute.String("command", "set_amps")))
+	}
+	return nil
+}
+
+// SetChargeLimit sets the maximum state-of-charge limit (percent). Tesla
+// enforces a vehicle-specific min/max (typically 50–100); this client clamps
+// to [50,100] as a defensive bound but the vehicle will reject anything
+// outside its supported range.
+func (c *TeslaClient) SetChargeLimit(ctx context.Context, percent int) error {
+	c.usage.RecordCommand()
+	if percent < 50 {
+		percent = 50
+	}
+	if percent > 100 {
+		percent = 100
+	}
+
+	path := fmt.Sprintf("/api/1/vehicles/%s/command/set_charge_limit", c.vin)
+	body := map[string]int{"percent": percent}
+	resp, err := c.doRequest(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if c.metrics != nil {
+		c.metrics.ChargeCommands.Add(ctx, 1, metric.WithAttributes(attribute.String("command", "set_charge_limit")))
 	}
 	return nil
 }

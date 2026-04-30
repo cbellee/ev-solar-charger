@@ -17,6 +17,10 @@ func (testModeController) SetChargingAmps(ctx context.Context, amps int) error {
 	return ErrCommandsDisabled
 }
 
+func (testModeController) SetChargeLimit(ctx context.Context, percent int) error {
+	return ErrCommandsDisabled
+}
+
 func (testModeController) StartCharging(ctx context.Context) error {
 	return ErrCommandsDisabled
 }

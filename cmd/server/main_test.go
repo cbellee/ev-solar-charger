@@ -68,6 +68,7 @@ func (fakeVehicle) GetChargeState(ctx context.Context) (tesla.ChargeState, error
 	return tesla.ChargeState{}, tesla.ErrCarOffline
 }
 func (fakeVehicle) SetChargingAmps(ctx context.Context, amps int) error { return nil }
+func (fakeVehicle) SetChargeLimit(ctx context.Context, percent int) error { return nil }
 func (fakeVehicle) StartCharging(ctx context.Context) error             { return nil }
 func (fakeVehicle) StopCharging(ctx context.Context) error              { return nil }
 func (fakeVehicle) WakeUp(ctx context.Context) error                    { return nil }

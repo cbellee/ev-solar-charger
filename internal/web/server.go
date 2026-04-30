@@ -27,6 +27,7 @@ func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logge
 	apiMux.HandleFunc("POST /api/control", handleControl(ctrl))
 	apiMux.HandleFunc("POST /api/mode", handleMode(ctrl))
 	apiMux.HandleFunc("POST /api/refresh", handleRefresh(ctrl))
+	apiMux.HandleFunc("POST /api/charge-limit", handleChargeLimit(ctrl))
 	apiMux.HandleFunc("GET /api/history", handleHistory(store))
 	apiMux.HandleFunc("GET /api/sessions", handleSessions(store))
 	apiMux.HandleFunc("GET /api/events", handleEvents(store))

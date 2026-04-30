@@ -5,6 +5,7 @@ import { PowerFlowDiagram } from "@/components/PowerFlowDiagram";
 import { Card } from "@/components/Card";
 import { ControlsPanel } from "@/components/ControlsPanel";
 import { APIUsageCard } from "@/components/APIUsageCard";
+import { ChargeLimitCard } from "@/components/ChargeLimitCard";
 import { STATE_BG, formatKW, formatTime } from "@/lib/format";
 import clsx from "clsx";
 
@@ -31,6 +32,7 @@ export default function DashboardPage() {
       <div className="space-y-6">
         <SolarCard snap={snap} />
         <EVChargingCard snap={snap} />
+        <ChargeLimitCard snap={snap} />
       </div>
 
       <ControlsPanel snap={snap} />
@@ -101,6 +103,9 @@ function EVChargingCard({ snap }: { snap: StateSnapshot }) {
         <Row k="Charging state" v={snap.chargingState || "—"} />
         <Row k="Target / Actual" v={`${snap.targetAmps} / ${snap.actualAmps} A`} />
         <Row k="Battery" v={`${snap.batteryPct.toFixed(0)} %`} />
+        {snap.chargeLimit > 0 && (
+          <Row k="Charge limit" v={`${snap.chargeLimit} %`} />
+        )}
       </div>
     </Card>
   );

@@ -50,6 +50,9 @@ type StateSnapshot struct {
 	TargetAmps         int       `json:"targetAmps"`
 	ActualAmps         int       `json:"actualAmps"`
 	BatteryPct         float64   `json:"batteryPct"`
+	ChargeLimit        int       `json:"chargeLimit"`
+	ChargeLimitMin     int       `json:"chargeLimitMin"`
+	ChargeLimitMax     int       `json:"chargeLimitMax"`
 	CarPluggedIn       bool      `json:"carPluggedIn"`
 	CarOnline          bool      `json:"carOnline"`
 	ChargingState      string    `json:"chargingState"`
@@ -722,6 +725,9 @@ func (c *Controller) updateSnapshot(power inverter.PowerData, cs tesla.ChargeSta
 		TargetAmps:         targetAmps,
 		ActualAmps:         cs.AmpsActual,
 		BatteryPct:         cs.BatteryPct,
+		ChargeLimit:        cs.ChargeLimit,
+		ChargeLimitMin:     cs.ChargeLimitMin,
+		ChargeLimitMax:     cs.ChargeLimitMax,
 		CarPluggedIn:       cs.PluggedIn,
 		CarOnline:          cs.IsOnline,
 		ChargingState:      cs.State,
@@ -888,6 +894,19 @@ func (c *Controller) ManualStop(ctx context.Context) error {
 		return fmt.Errorf("controller: manual stop requires manual mode")
 	}
 	return c.vehicle.StopCharging(ctx)
+}
+
+// SetChargeLimit sets the vehicle's charge limit (percent). Available in both
+// auto and manual modes since it's a vehicle setting rather than a charge
+// command, and disabled in test mode.
+func (c *Controller) SetChargeLimit(ctx context.Context, percent int) error {
+	if c.cfg.TeslaTestMode {
+		return tesla.ErrCommandsDisabled
+	}
+	if percent < 50 || percent > 100 {
+		return fmt.Errorf("controller: charge limit %d out of range [50,100]", percent)
+	}
+	return c.vehicle.SetChargeLimit(ctx, percent)
 }
 
 // GetStateSnapshot returns a thread-safe copy of the current state.

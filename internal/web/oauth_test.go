@@ -30,6 +30,7 @@ func (m *oauthTestVehicle) GetChargeState(ctx context.Context) (tesla.ChargeStat
 	return tesla.ChargeState{}, nil
 }
 func (m *oauthTestVehicle) SetChargingAmps(ctx context.Context, amps int) error { return nil }
+func (m *oauthTestVehicle) SetChargeLimit(ctx context.Context, percent int) error { return nil }
 func (m *oauthTestVehicle) StartCharging(ctx context.Context) error             { return nil }
 func (m *oauthTestVehicle) StopCharging(ctx context.Context) error              { return nil }
 func (m *oauthTestVehicle) WakeUp(ctx context.Context) error                    { return nil }

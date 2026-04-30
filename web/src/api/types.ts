@@ -30,6 +30,9 @@ export interface StateSnapshot {
   targetAmps: number;
   actualAmps: number;
   batteryPct: number;
+  chargeLimit: number;
+  chargeLimitMin: number;
+  chargeLimitMax: number;
   carPluggedIn: boolean;
   carOnline: boolean;
   chargingState: string;

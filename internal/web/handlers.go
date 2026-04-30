@@ -141,6 +141,33 @@ type modeRequest struct {
 	Mode string `json:"mode"`
 }
 
+type chargeLimitRequest struct {
+	Percent int `json:"percent"`
+}
+
+func handleChargeLimit(ctrl *controller.Controller) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireJSON(w, r) {
+			return
+		}
+		var req chargeLimitRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if req.Percent < 50 || req.Percent > 100 {
+			writeJSONError(w, http.StatusBadRequest, "percent must be in [50,100]")
+			return
+		}
+		if err := ctrl.SetChargeLimit(r.Context(), req.Percent); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "set charge limit failed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"result":"ok"}`))
+	}
+}
+
 func handleRefresh(ctrl *controller.Controller) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctrl.ForceRefresh(r.Context())

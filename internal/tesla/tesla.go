@@ -17,11 +17,14 @@ var (
 
 // ChargeState holds the vehicle's current charging information.
 type ChargeState struct {
-	State      string
-	AmpsActual int
-	BatteryPct float64
-	PluggedIn  bool
-	IsOnline   bool
+	State          string
+	AmpsActual     int
+	BatteryPct     float64
+	PluggedIn      bool
+	IsOnline       bool
+	ChargeLimit    int // current charge_limit_soc setting (percent)
+	ChargeLimitMin int // vehicle-reported minimum allowed limit
+	ChargeLimitMax int // vehicle-reported maximum allowed limit
 }
 
 // APIUsage tracks Tesla Fleet API call counts for the current billing month.
@@ -132,6 +135,7 @@ func (t *APIUsageTracker) SetCounts(dataCalls, commandCalls, wakeCalls, streamSi
 type VehicleController interface {
 	GetChargeState(ctx context.Context) (ChargeState, error)
 	SetChargingAmps(ctx context.Context, amps int) error
+	SetChargeLimit(ctx context.Context, percent int) error
 	StartCharging(ctx context.Context) error
 	StopCharging(ctx context.Context) error
 	WakeUp(ctx context.Context) error

@@ -79,6 +79,13 @@ export const api = {
     });
   },
 
+  setChargeLimit(percent: number): Promise<{ result: string }> {
+    return jsonFetch("/api/charge-limit", {
+      method: "POST",
+      body: JSON.stringify({ percent }),
+    });
+  },
+
   getHistory(q: HistoryQuery): Promise<Reading[]> {
     const params = new URLSearchParams({
       from: q.from,

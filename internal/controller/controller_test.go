@@ -36,6 +36,7 @@ type mockVehicle struct {
 	stateErr    error
 	calls       []string
 	setAmpsErr  error
+	setLimitErr error
 	startErr    error
 	stopErr     error
 	wakeErr     error
@@ -52,6 +53,13 @@ func (m *mockVehicle) SetChargingAmps(ctx context.Context, amps int) error {
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, fmt.Sprintf("SetChargingAmps:%d", amps))
 	return m.setAmpsErr
+}
+
+func (m *mockVehicle) SetChargeLimit(ctx context.Context, percent int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, fmt.Sprintf("SetChargeLimit:%d", percent))
+	return m.setLimitErr
 }
 
 func (m *mockVehicle) StartCharging(ctx context.Context) error {
