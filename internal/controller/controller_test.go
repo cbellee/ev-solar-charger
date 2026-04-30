@@ -1015,3 +1015,106 @@ func containsAny(s string, subs ...string) bool {
 	}
 	return false
 }
+
+func Test_Tick_offlineSurplusBelowWakeMargin(t *testing.T) {
+	// 2400W / 240V = 10A. With MinChargeAmps=5 and WakeMinAmpsMargin=8, the
+	// effective wake threshold is 13A so we should NOT wake.
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 6000, GridWatts: -2400, SurplusWatts: 2400}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: false}, stateErr: tesla.ErrCarOffline}
+	cfg := defaultCfg()
+	cfg.WakeMinAmpsMargin = 8
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+	ctrl.mu.Lock()
+	ctrl.lastKnownPluggedIn = true
+	ctrl.mu.Unlock()
+	for i := 0; i < cfg.WakeThresholdPolls+2; i++ {
+		ctrl.Tick(context.Background())
+	}
+	for _, c := range veh.getCalls() {
+		if c == "WakeUp" {
+			t.Fatalf("expected no WakeUp under wake margin, got calls %v", veh.getCalls())
+		}
+	}
+	if got := ctrl.GetStateSnapshot().State; got != StateMonitoring {
+		t.Errorf("State = %q, want %q", got, StateMonitoring)
+	}
+}
+
+func Test_Tick_offlineSurplusAboveWakeMargin(t *testing.T) {
+	// 4800W / 240V = 20A; margin 8 → threshold 13A; 20>=13 → wake should fire.
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 8000, GridWatts: -4800, SurplusWatts: 4800}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: false}, stateErr: tesla.ErrCarOffline}
+	cfg := defaultCfg()
+	cfg.WakeMinAmpsMargin = 8
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+	ctrl.mu.Lock()
+	ctrl.lastKnownPluggedIn = true
+	ctrl.mu.Unlock()
+	for i := 0; i < cfg.WakeThresholdPolls; i++ {
+		ctrl.Tick(context.Background())
+	}
+	wakeFound := false
+	for _, c := range veh.getCalls() {
+		if c == "WakeUp" {
+			wakeFound = true
+		}
+	}
+	if !wakeFound {
+		t.Fatalf("expected WakeUp call, got %v", veh.getCalls())
+	}
+}
+
+func Test_shouldAttemptWake_suppressedAfterNonActionable(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.WakeAfterNonActionableBackoff = 30 * time.Minute
+	ctrl := newTestControllerWithConfig(&mockInverter{}, &mockVehicle{}, &mockStore{}, cfg)
+	ctrl.mu.Lock()
+	ctrl.lastKnownPluggedIn = true
+	ctrl.lastOnlineAt = time.Now()
+	ctrl.lastNonActionableAt = time.Now().Add(-5 * time.Minute)
+	ctrl.mu.Unlock()
+	if ctrl.shouldAttemptWake() {
+		t.Errorf("expected wake suppression within backoff window, got allowed")
+	}
+	ctrl.mu.Lock()
+	ctrl.lastNonActionableAt = time.Now().Add(-31 * time.Minute)
+	ctrl.mu.Unlock()
+	if !ctrl.shouldAttemptWake() {
+		t.Errorf("expected wake allowed after backoff expires")
+	}
+}
+
+func Test_updateKnownPlugState_stampsAndClearsNonActionable(t *testing.T) {
+	ctrl := newTestController(&mockInverter{}, &mockVehicle{}, &mockStore{})
+	// Online + Disconnected: should stamp.
+	ctrl.updateKnownPlugState(tesla.ChargeState{IsOnline: true, PluggedIn: false, State: "Disconnected"})
+	ctrl.mu.RLock()
+	stamped := !ctrl.lastNonActionableAt.IsZero()
+	ctrl.mu.RUnlock()
+	if !stamped {
+		t.Fatalf("expected lastNonActionableAt set after Disconnected observation")
+	}
+	// Online + actionable: should clear.
+	ctrl.updateKnownPlugState(tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"})
+	ctrl.mu.RLock()
+	cleared := ctrl.lastNonActionableAt.IsZero()
+	ctrl.mu.RUnlock()
+	if !cleared {
+		t.Fatalf("expected lastNonActionableAt cleared after actionable observation")
+	}
+	// Offline: should not modify.
+	ctrl.updateKnownPlugState(tesla.ChargeState{IsOnline: true, PluggedIn: false, State: "Complete"})
+	ctrl.mu.RLock()
+	stamped2 := !ctrl.lastNonActionableAt.IsZero()
+	ctrl.mu.RUnlock()
+	if !stamped2 {
+		t.Fatalf("expected lastNonActionableAt set after Complete observation")
+	}
+	ctrl.updateKnownPlugState(tesla.ChargeState{IsOnline: false, PluggedIn: true, State: "Stopped"})
+	ctrl.mu.RLock()
+	stillStamped := !ctrl.lastNonActionableAt.IsZero()
+	ctrl.mu.RUnlock()
+	if !stillStamped {
+		t.Errorf("offline observation should not clear lastNonActionableAt")
+	}
+}

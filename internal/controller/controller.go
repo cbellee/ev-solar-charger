@@ -88,6 +88,7 @@ type Controller struct {
 
 	lastTeslaPoll          time.Time
 	lastWakeAttempt        time.Time
+	lastNonActionableAt    time.Time
 	lastChargeStartAttempt time.Time
 	lastCommandFailure     time.Time
 	cachedChargeState      tesla.ChargeState
@@ -248,6 +249,21 @@ func (c *Controller) Tick(ctx context.Context) {
 		c.mu.Unlock()
 
 		if !chargeState.IsOnline {
+			// Require an extra margin above MinChargeAmps before waking the
+			// car. Wakes cost an API call and take ~30s, during which a
+			// borderline surplus often collapses, leading to a wasted wake
+			// followed immediately by "waiting for surplus". The margin only
+			// applies to the wake decision; once the car is online the
+			// regular MinChargeAmps threshold governs charge start.
+			if availableAmps < c.cfg.MinChargeAmps+c.cfg.WakeMinAmpsMargin {
+				c.transitionTo(ctx, StateMonitoring, "surplus below wake margin")
+				c.updateSnapshot(power, chargeState, availableAmps)
+				c.accumulateSample(power, chargeState, availableAmps, ctx)
+				if c.OnUpdate != nil {
+					c.OnUpdate(c.GetStateSnapshot())
+				}
+				return
+			}
 			if surplus >= c.cfg.WakeThresholdPolls {
 				c.mu.RLock()
 				lastWake := c.lastWakeAttempt
@@ -473,6 +489,17 @@ func (c *Controller) updateKnownPlugState(cs tesla.ChargeState) {
 	c.mu.Lock()
 	c.lastKnownPluggedIn = cs.PluggedIn
 	c.lastOnlineAt = time.Now()
+	// Track when we last confirmed the car is in a state from which we
+	// cannot start charging (cable removed, battery full). This is used to
+	// suppress wake commands until either the user changes plug state or a
+	// timeout elapses, since waking again won't help — only physical
+	// action by the user can resolve it.
+	if !cs.PluggedIn || cs.State == "Disconnected" || cs.State == "Complete" {
+		c.lastNonActionableAt = time.Now()
+	} else {
+		// Plugged in and in an actionable state; clear the suppression.
+		c.lastNonActionableAt = time.Time{}
+	}
 	c.mu.Unlock()
 }
 
@@ -553,6 +580,14 @@ func (c *Controller) shouldAttemptWake() bool {
 	// wake attempts indefinitely.
 	if c.cfg.PluggedInStaleAfter > 0 && !c.lastOnlineAt.IsZero() &&
 		time.Since(c.lastOnlineAt) > c.cfg.PluggedInStaleAfter {
+		return false
+	}
+	// If we recently confirmed the car is in a non-actionable state
+	// (Disconnected / Complete), waking again won't help. Suppress wakes
+	// until the backoff window elapses; the next online tick that confirms
+	// an actionable state will clear the timestamp.
+	if c.cfg.WakeAfterNonActionableBackoff > 0 && !c.lastNonActionableAt.IsZero() &&
+		time.Since(c.lastNonActionableAt) < c.cfg.WakeAfterNonActionableBackoff {
 		return false
 	}
 	// Don't wake the car outside the allowed daytime window.
@@ -798,6 +833,7 @@ func (c *Controller) ForceRefresh(ctx context.Context) {
 	c.cachedChargeState = tesla.ChargeState{}
 	c.lastTeslaPoll = time.Time{}
 	c.lastWakeAttempt = time.Time{}
+	c.lastNonActionableAt = time.Time{}
 	c.lastChargeStartAttempt = time.Time{}
 	c.lastCommandFailure = time.Time{}
 	c.consecutiveLow = 0

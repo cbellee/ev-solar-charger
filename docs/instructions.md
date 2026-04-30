@@ -675,6 +675,8 @@ All configuration is via environment variables:
 | `LINE_VOLTAGE` | No | `240` | Mains voltage (for watts-to-amps conversion) |
 | `DEADBAND_POLLS` | No | `3` | Consecutive low-surplus ticks before stopping |
 | `WAKE_THRESHOLD_POLLS` | No | `6` | Consecutive surplus ticks before waking car |
+| `WAKE_MIN_AMPS_MARGIN` | No | `2` | Extra amps above `MIN_CHARGE_AMPS` required to initiate a wake (avoids transient-surplus wakes) |
+| `WAKE_AFTER_NON_ACTIONABLE_BACKOFF_SECONDS` | No | `1800` | Suppress wakes for this many seconds after observing the car in a non-actionable state (Disconnected, Complete) |
 | `TESLA_CHARGING_POLL_SECONDS` | No | `60` | Seconds between Tesla API polls while charging |
 | `TESLA_IDLE_POLL_SECONDS` | No | `300` | Seconds between Tesla API polls when idle with surplus |
 | `AMPS_CHANGE_THRESHOLD` | No | `2` | Minimum amp change to send a `SetChargingAmps` command |

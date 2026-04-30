@@ -12,51 +12,53 @@ import (
 
 // Config holds all application configuration loaded from environment variables.
 type Config struct {
-	SungrowHost               string
-	SungrowPort               int
-	TeslaClientID             string
-	TeslaClientSecret         string
-	TeslaRefreshToken         string
-	TeslaRedirectURI          string
-	TeslaScope                string
-	TeslaVIN                  string
-	TeslaPrivateKeyPath       string
-	TeslaPublicKeyPEMPath     string
-	OAuthStateHMACKey         string
-	TeslaTokenPath            string
-	TeslaRegion               string
-	TeslaCommandBase          string
-	TeslaProxyCAFile          string
-	TeslaTestMode             bool
-	PollInterval              time.Duration
-	MinChargeAmps             int
-	MaxChargeAmps             int
-	LineVoltage               int
-	DeadbandPolls             int
-	WakeThresholdPolls        int
-	WakeRetryInterval         time.Duration
-	WakeAllowedStartHour      int
-	WakeAllowedEndHour        int
-	WakeTimezone              *time.Location
-	PluggedInStaleAfter       time.Duration
-	ChargeStartRetry          time.Duration
-	CommandFailureBackoff     time.Duration
-	TeslaChargingPollInterval time.Duration
-	TeslaIdlePollInterval     time.Duration
-	AmpsChangeThreshold       int
-	HTTPHost                  string
-	HTTPPort                  int
-	TLSEnabled                bool
-	TLSDomain                 string
-	TLSCertDir                string
-	TLSPort                   int
-	HTTPChallengePort         int
-	EntraTenantID             string
-	EntraClientID             string
-	EntraAllowedOIDs          []string
-	LogLevel                  slog.Level
-	DBPath                    string
-	DBRetentionDays           int
+	SungrowHost                   string
+	SungrowPort                   int
+	TeslaClientID                 string
+	TeslaClientSecret             string
+	TeslaRefreshToken             string
+	TeslaRedirectURI              string
+	TeslaScope                    string
+	TeslaVIN                      string
+	TeslaPrivateKeyPath           string
+	TeslaPublicKeyPEMPath         string
+	OAuthStateHMACKey             string
+	TeslaTokenPath                string
+	TeslaRegion                   string
+	TeslaCommandBase              string
+	TeslaProxyCAFile              string
+	TeslaTestMode                 bool
+	PollInterval                  time.Duration
+	MinChargeAmps                 int
+	MaxChargeAmps                 int
+	LineVoltage                   int
+	DeadbandPolls                 int
+	WakeThresholdPolls            int
+	WakeRetryInterval             time.Duration
+	WakeAfterNonActionableBackoff time.Duration
+	WakeMinAmpsMargin             int
+	WakeAllowedStartHour          int
+	WakeAllowedEndHour            int
+	WakeTimezone                  *time.Location
+	PluggedInStaleAfter           time.Duration
+	ChargeStartRetry              time.Duration
+	CommandFailureBackoff         time.Duration
+	TeslaChargingPollInterval     time.Duration
+	TeslaIdlePollInterval         time.Duration
+	AmpsChangeThreshold           int
+	HTTPHost                      string
+	HTTPPort                      int
+	TLSEnabled                    bool
+	TLSDomain                     string
+	TLSCertDir                    string
+	TLSPort                       int
+	HTTPChallengePort             int
+	EntraTenantID                 string
+	EntraClientID                 string
+	EntraAllowedOIDs              []string
+	LogLevel                      slog.Level
+	DBPath                        string
+	DBRetentionDays               int
 }
 
 // Load reads configuration from environment variables, applies defaults,
@@ -207,6 +209,23 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: PLUGGED_IN_STALE_AFTER_SECONDS must be >= 1, got %d", plugStaleSec)
 	}
 	cfg.PluggedInStaleAfter = time.Duration(plugStaleSec) * time.Second
+
+	wakeNonActionableSec, err := envInt("WAKE_AFTER_NON_ACTIONABLE_BACKOFF_SECONDS", 1800)
+	if err != nil {
+		return Config{}, err
+	}
+	if wakeNonActionableSec < 0 {
+		return Config{}, fmt.Errorf("config: WAKE_AFTER_NON_ACTIONABLE_BACKOFF_SECONDS must be >= 0, got %d", wakeNonActionableSec)
+	}
+	cfg.WakeAfterNonActionableBackoff = time.Duration(wakeNonActionableSec) * time.Second
+
+	cfg.WakeMinAmpsMargin, err = envInt("WAKE_MIN_AMPS_MARGIN", 2)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.WakeMinAmpsMargin < 0 {
+		return Config{}, fmt.Errorf("config: WAKE_MIN_AMPS_MARGIN must be >= 0, got %d", cfg.WakeMinAmpsMargin)
+	}
 
 	cfg.WakeAllowedStartHour, err = envInt("WAKE_ALLOWED_START_HOUR", 8)
 	if err != nil {

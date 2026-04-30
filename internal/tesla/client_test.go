@@ -193,6 +193,36 @@ func Test_GetChargeState_disconnected(t *testing.T) {
 	}
 }
 
+func Test_GetChargeState_disconnectedDespiteEngagedLatch(t *testing.T) {
+	// Some firmware reports latch=Engaged briefly after the cable is removed.
+	// Trusting the latch alone causes the controller to keep waking a car
+	// that is no longer plugged in. The disconnected charging state must
+	// override the latch.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"charge_state": map[string]any{
+					"charging_state":    "Disconnected",
+					"charge_port_latch": "Engaged",
+				},
+				"state": "online",
+			},
+		})
+	})
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+	cs, err := c.GetChargeState(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cs.PluggedIn {
+		t.Error("PluggedIn should be false when ChargingState=Disconnected even if latch=Engaged")
+	}
+	if cs.State != "Disconnected" {
+		t.Errorf("State = %q, want Disconnected", cs.State)
+	}
+}
+
 func Test_GetChargeState_vehicleOffline(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {

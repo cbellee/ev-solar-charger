@@ -308,11 +308,18 @@ func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
 		return ChargeState{}, fmt.Errorf("tesla: decode charge state: %w", err)
 	}
 
+	// Derive plug state from both the latch and the charging state. On some
+	// firmware versions the latch can report "Engaged" briefly after the
+	// cable is removed, but the charging state will be "Disconnected".
+	// Trusting the latch alone causes the controller to keep waking a car
+	// that is no longer plugged in.
+	chargingState := result.Response.ChargeState.ChargingState
+	latchEngaged := result.Response.ChargeState.ChargePortLatch == "Engaged"
 	cs := ChargeState{
-		State:      result.Response.ChargeState.ChargingState,
+		State:      chargingState,
 		AmpsActual: result.Response.ChargeState.ChargeAmps,
 		BatteryPct: result.Response.ChargeState.BatteryLevel,
-		PluggedIn:  result.Response.ChargeState.ChargePortLatch == "Engaged",
+		PluggedIn:  latchEngaged && chargingState != "Disconnected",
 		IsOnline:   result.Response.State == "online",
 	}
 
