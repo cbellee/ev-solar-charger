@@ -31,7 +31,7 @@ export function PowerFlowDiagram({ snap }: Props) {
 
   return (
     <div className="relative">
-      <svg viewBox="0 0 600 320" className="w-full h-auto">
+      <svg viewBox="0 0 600 360" className="w-full h-auto">
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />

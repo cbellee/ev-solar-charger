@@ -89,11 +89,11 @@ type nullVehicle struct{}
 func (n *nullVehicle) GetChargeState(ctx context.Context) (tesla.ChargeState, error) {
 	return tesla.ChargeState{}, nil
 }
-func (n *nullVehicle) SetChargingAmps(ctx context.Context, amps int) error { return nil }
+func (n *nullVehicle) SetChargingAmps(ctx context.Context, amps int) error   { return nil }
 func (n *nullVehicle) SetChargeLimit(ctx context.Context, percent int) error { return nil }
-func (n *nullVehicle) StartCharging(ctx context.Context) error             { return nil }
-func (n *nullVehicle) StopCharging(ctx context.Context) error              { return nil }
-func (n *nullVehicle) WakeUp(ctx context.Context) error                    { return nil }
+func (n *nullVehicle) StartCharging(ctx context.Context) error               { return nil }
+func (n *nullVehicle) StopCharging(ctx context.Context) error                { return nil }
+func (n *nullVehicle) WakeUp(ctx context.Context) error                      { return nil }
 func (n *nullVehicle) SetRefreshToken(ctx context.Context, refreshToken string) error {
 	return nil
 }
