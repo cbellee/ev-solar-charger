@@ -206,6 +206,32 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	// 8. Create controller.
 	ctrl := controller.New(inv, vehicle, store, cfg, logger, metrics)
 
+	// 8b. Restore Tesla API usage counters from the most recent persisted
+	// snapshot in the current calendar month, so restarts don't reset the
+	// "this month" totals shown in the dashboard.
+	if tc, ok := vehicle.(*tesla.TeslaClient); ok {
+		now := time.Now()
+		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		if snaps, qerr := store.QueryAPIUsage(ctx, monthStart, now, 1); qerr != nil {
+			logger.Warn("failed to restore api usage from store", "error", qerr)
+		} else if len(snaps) > 0 {
+			s := snaps[0]
+			tc.RestoreAPIUsage(tesla.APIUsage{
+				DataCalls:     s.DataCalls,
+				CommandCalls:  s.CommandCalls,
+				WakeCalls:     s.WakeCalls,
+				StreamSignals: s.StreamSignals,
+				MonthStarted:  monthStart,
+			})
+			logger.Info("restored api usage counters",
+				"data", s.DataCalls,
+				"command", s.CommandCalls,
+				"wake", s.WakeCalls,
+				"stream", s.StreamSignals,
+				"snapshot_at", s.Timestamp)
+		}
+	}
+
 	// 9. Create SSE hub and wire up controller notifications.
 	hub := deps.newHub(logger)
 	ctrl.OnUpdate = hub.Broadcast

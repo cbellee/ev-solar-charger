@@ -109,6 +109,25 @@ func (t *APIUsageTracker) Snapshot() APIUsage {
 	}
 }
 
+// SetCounts seeds the tracker with previously persisted counters. The
+// monthStart of the supplied data must match the current calendar month
+// for the counters to be applied; older snapshots are ignored so a new
+// month always starts from zero.
+func (t *APIUsageTracker) SetCounts(dataCalls, commandCalls, wakeCalls, streamSignals int64, monthStart time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	currentMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	if monthStart.IsZero() || monthStart.Before(currentMonth) {
+		return
+	}
+	t.dataCalls = dataCalls
+	t.commandCalls = commandCalls
+	t.wakeCalls = wakeCalls
+	t.streamSignals = streamSignals
+	t.monthStart = currentMonth
+}
+
 // VehicleController controls EV charging.
 type VehicleController interface {
 	GetChargeState(ctx context.Context) (ChargeState, error)

@@ -411,6 +411,13 @@ func (c *TeslaClient) GetAPIUsage() APIUsage {
 	return c.usage.Snapshot()
 }
 
+// RestoreAPIUsage seeds the in-memory usage tracker from a previously
+// persisted snapshot. Snapshots older than the current calendar month are
+// ignored.
+func (c *TeslaClient) RestoreAPIUsage(u APIUsage) {
+	c.usage.SetCounts(u.DataCalls, u.CommandCalls, u.WakeCalls, u.StreamSignals, u.MonthStarted)
+}
+
 // SetRefreshToken updates the refresh token and immediately refreshes the access token.
 func (c *TeslaClient) SetRefreshToken(ctx context.Context, refreshToken string) error {
 	if strings.TrimSpace(refreshToken) == "" {
