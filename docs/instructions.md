@@ -262,12 +262,19 @@ LINE_VOLTAGE=240
 DEADBAND_POLLS=3
 WAKE_THRESHOLD_POLLS=6
 
-# --- Web ---
+# --- Web (auth via Entra ID) ---
+ENTRA_TENANT_ID=<your tenant GUID>
+ENTRA_CLIENT_ID=<app registration client ID>
+ENTRA_ALLOWED_OIDS=<comma-separated user OIDs allowed to sign in>
+VITE_ENTRA_TENANT_ID=${ENTRA_TENANT_ID}     # baked into the SPA at Docker build time
+VITE_ENTRA_CLIENT_ID=${ENTRA_CLIENT_ID}
 HTTP_HOST=0.0.0.0
 HTTP_PORT=8080
-HTTP_AUTH_USER=admin
-HTTP_AUTH_PASSWORD=<openssl rand -base64 24>
 TLS_ENABLED=false                   # DSM terminates TLS
+
+# --- Tesla command signing (vehicle-command proxy sidecar) ---
+TESLA_COMMAND_BASE=https://tesla-http-proxy:4443
+TESLA_PROXY_CA_FILE=/secrets/proxy-tls-cert.pem
 
 # --- Storage / logging ---
 DB_PATH=/data/solar-ev-charger.db
@@ -310,6 +317,37 @@ volumes:
 
 The base `docker-compose.yml` (used for local builds) should not publish ports 80/443/8080 to avoid collisions.
 
+### 5.3 `tesla-http-proxy` sidecar
+
+The base `docker-compose.yml` declares a `tesla-http-proxy` service alongside the main container. This proxy (image `tesla/vehicle-command:latest`) signs `command/*` and `wake_up` requests with the fleet private key — newer Tesla firmware rejects unsigned commands with HTTP 403.
+
+The proxy needs three files in `./secrets/`:
+
+| File | Purpose | How to generate |
+|---|---|---|
+| `fleet-key.pem` | Fleet private key (P-256) | Already created in §1.2 |
+| `proxy-tls-key.pem` | TLS private key for the proxy listener | `openssl ecparam -name prime256v1 -genkey -noout -out secrets/proxy-tls-key.pem` |
+| `proxy-tls-cert.pem` | Self-signed cert presented by the proxy on `:4443` | `openssl req -new -x509 -key secrets/proxy-tls-key.pem -out secrets/proxy-tls-cert.pem -days 3650 -subj "/CN=tesla-http-proxy"` |
+
+The controller trusts the proxy's self-signed cert via `TESLA_PROXY_CA_FILE`, and routes commands through it via `TESLA_COMMAND_BASE` (set in `.env` per §5.1). The two services are connected by Docker Compose's default network; `depends_on: [tesla-http-proxy]` on the main service ensures startup order.
+
+After the proxy is running for the first time, pair the public key to the vehicle by opening `https://tesla.com/_ak/<your-domain>` from the Tesla mobile app on a device signed in to your Tesla account.
+
+### 5.4 Entra ID app registration
+
+User authentication uses Microsoft Entra ID via MSAL.js. Create an app registration:
+
+1. Sign in to <https://entra.microsoft.com> → **Identity → Applications → App registrations → New registration**
+2. Name: e.g. `EV Solar Charger`
+3. Supported account types: **Single tenant** (or Multitenant if you need cross-tenant access)
+4. Redirect URI: **SPA** → `https://ev.bellee.net/`
+5. After creation, note the **Application (client) ID** and **Directory (tenant) ID**
+6. **Authentication** → enable **ID tokens (used for implicit and hybrid flows)**
+7. **Token configuration** is not required — the default ID token already includes `oid`
+8. Find the **Object ID** of every user account that should be allowed to sign in (Entra → Users → user → Object ID). These go into `ENTRA_ALLOWED_OIDS` as a comma-separated list
+
+Set `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_ALLOWED_OIDS` in `.env`, and pass `VITE_ENTRA_TENANT_ID` / `VITE_ENTRA_CLIENT_ID` as build args when building the container image (the `Dockerfile` and CI workflow already wire this up).
+
 ---
 
 ## 6. Start the Container
@@ -326,8 +364,10 @@ Smoke test from your Mac (or cellular):
 
 ```bash
 curl -kI https://ev.bellee.net/healthz                    # 200 OK, no auth
-curl -ku admin:'<password>' -I https://ev.bellee.net/      # 200 OK with auth
+curl -kI https://ev.bellee.net/                           # 200 OK — SPA is publicly cacheable; protected calls are gated by Entra ID Bearer tokens
 ```
+
+The dashboard itself authenticates the user with Microsoft Entra ID via MSAL.js. Open `https://ev.bellee.net/` in a browser, sign in with an account whose OID is listed in `ENTRA_ALLOWED_OIDS`, and the SPA will attach `Authorization: Bearer …` to every `/api/*` and `/events` request.
 
 ---
 
@@ -367,7 +407,7 @@ The `partner_accounts` POST must return your domain's public key. If it fails, c
 In a **fresh incognito tab** (your Mac if hairpin works, otherwise cellular):
 
 1. Visit `https://ev.bellee.net/auth/tesla`
-2. Enter basic auth (`admin` / `<password>`)
+2. Sign in with Microsoft Entra ID (your account's OID must be in `ENTRA_ALLOWED_OIDS`)
 3. You're redirected to `auth.tesla.com` — sign in with your Tesla account
 4. Approve the requested scopes
 5. Tesla redirects back to `https://ev.bellee.net/auth/tesla/callback?...`
@@ -469,12 +509,13 @@ Data persists in the `solar-data` named volume.
 ## 10. Security Notes
 
 - TLS terminates at DSM nginx; the container speaks plain HTTP on `localhost:8090` and is not exposed to the LAN
-- Basic auth gates the dashboard and all `/api/*` endpoints. Use a strong password (`openssl rand -base64 24`)
+- The dashboard and all `/api/*` endpoints require a Microsoft Entra ID ID token. Only OIDs listed in `ENTRA_ALLOWED_OIDS` may sign in
 - `/auth/tesla*`, `/.well-known/appspecific/com.tesla.3p.public-key.pem`, and `/healthz` are intentionally public (Tesla and Let's Encrypt need to reach them)
+- Tesla charge commands are signed by the `tesla-http-proxy` sidecar using the fleet private key, which is mounted read-only at `/secrets/fleet-key.pem`
 - The refresh token file has mode `0600` inside a `0700` directory
-- The HMAC key (`OAUTH_STATE_HMAC_KEY`) signs the OAuth state cookie — never commit it
-- The Tesla private key (`fleet-key.pem`) is mounted read-only at `/secrets/fleet-key.pem`. The host directory is git-ignored
-- State-changing JSON APIs (`POST /api/control`, `POST /api/mode`) require `Content-Type: application/json` and reject bodies larger than 4 KiB
+- The HMAC key (`OAUTH_STATE_HMAC_KEY`) signs the Tesla OAuth state cookie — never commit it
+- The Tesla private key (`fleet-key.pem`) is mounted read-only into both the controller and the proxy. The host directory is git-ignored
+- State-changing JSON APIs (`POST /api/control`, `POST /api/mode`, `POST /api/charge-limit`) require `Content-Type: application/json` and reject bodies larger than 4 KiB
 - When the container's own TLS listener is enabled, the HTTPS listener requires TLS 1.3 or newer
 - OAuth callback errors are logged server-side; only generic messages are shown in the browser. Check application logs for full error detail
 - Never commit `.env`, `secrets/`, or `*.pem` files. The repo's `.gitignore` and `.dockerignore` exclude these paths; rotate any secret that was previously committed
@@ -491,14 +532,17 @@ This application monitors surplus solar generation from a Sungrow SG8.0RS invert
 ### Architecture
 
 ```
-┌──────────────┐     WebSocket      ┌───────────────────┐     HTTP/REST      ┌─────────────┐
-│  Sungrow      │◄──────────────────►│  Solar EV Charger  │◄──────────────────►│  Tesla Fleet │
-│  WiNet-S      │  token + registers │  Controller        │  OAuth2 + commands│  API         │
-└──────────────┘                    ├───────────────────┤                    └─────────────┘
-                                     │  SQLite (WAL)      │
-                                     │  Web UI (htmx/SSE) │
-                                     │  OTel observability│
-                                     └───────────────────┘
+┌──────────────┐     WebSocket      ┌───────────────────┐                     ┌──────────────────┐
+│  Sungrow      │◄──────────────────►│  Solar EV Charger  │  data reads (HTTP)  │  Tesla Fleet API  │
+│  WiNet-S      │  token + registers │  Controller        │◄───────────────────►│  (OAuth2)         │
+└──────────────┘                    ├───────────────────┤                     └──────────────────┘
+                                     │  SQLite (WAL)      │                              ▲
+                                     │  React SPA + SSE   │                              │ signed commands
+                                     │  Entra ID auth     │                              │ (vehicle command
+                                     │  OTel observability│     ┌────────────────────┐ │  protocol)
+                                     └───────────────┬───────────┘►────│  tesla-http-proxy │─┘
+                                                     POSTs       │  (sidecar, 4443) │
+                                                                 └────────────────────┘
 ```
 
 ### Key packages
@@ -512,7 +556,8 @@ This application monitors surplus solar generation from a Sungrow SG8.0RS invert
 | `internal/tesla` | Tesla Fleet API client (OAuth2, token refresh, commands) |
 | `internal/storage` | SQLite store with FTS5 full-text search |
 | `internal/observability` | OpenTelemetry SDK setup, structured logging, metrics |
-| `internal/web` | HTTP handlers, SSE hub, embedded HTML dashboard |
+| `internal/web` | HTTP handlers, SSE hub, Entra ID auth, embedded React SPA bundle |
+| `web/` | React + Vite + TypeScript + Tailwind SPA (built into `web/dist/` and embedded by the Go binary) |
 
 ---
 
@@ -611,39 +656,48 @@ The Tesla Fleet API uses OAuth2 with the following flow:
 
 1. **Initial setup** — register an application at [developer.tesla.com](https://developer.tesla.com) and obtain a `client_id`, `client_secret`, and a `refresh_token` by completing the OAuth2 authorization code flow once via the in-app `/auth/tesla` route (see Part A, step 7)
 2. **Token refresh** — the app uses the refresh token to obtain short-lived access tokens automatically. Tokens are refreshed on 401 responses
-3. **Vehicle commands** — `SetChargingAmps`, `StartCharging`, `StopCharging`, and `WakeUp` are called via the Fleet API REST endpoints
-4. **Virtual Key (optional)** — if `TESLA_PRIVATE_KEY_PATH` points to an EC private key, the client can sign commands. Required for newer vehicles
-5. **Regions** — the API endpoint is selected by `TESLA_REGION`: `na` (North America), `eu` (Europe), or `cn` (China)
+3. **Vehicle data reads** — `GetChargeState` calls the Fleet API directly
+4. **Vehicle commands** — `SetChargingAmps`, `SetChargeLimit`, `StartCharging`, `StopCharging`, and `WakeUp` are routed through the `tesla-http-proxy` sidecar (image `tesla/vehicle-command:latest`), which signs them with the fleet private key (`fleet-key.pem`) and forwards them to Tesla. Newer firmware rejects unsigned commands with HTTP 403, so the proxy is mandatory in practice
+5. **Virtual Key pairing** — after the proxy is running, pair the public key to the vehicle by opening `https://tesla.com/_ak/<your-domain>` on the Tesla app's mobile deep-link
+6. **Regions** — the API endpoint is selected by `TESLA_REGION`: `na` (North America), `eu` (Europe), or `cn` (China)
 
 ---
 
 ## Web Dashboard
 
-A single-page dashboard is served at `/` using Tailwind CSS, htmx, and native `EventSource` (SSE):
+A single-page React application (Vite + TypeScript + Tailwind) is served at `/` from the embedded `web/dist/` bundle:
 
-- **Real-time panel** — PV, grid, load, surplus watts, charge amps, battery %, state
+- **Dashboard** — animated power-flow diagram (Solar, House, Grid, EV nodes), live PV / grid / load / surplus, charging state, target/actual amps, battery %, and the current charge-limit setting
+- **Charge-limit slider** — sets the vehicle's `charge_limit_soc` via `POST /api/charge-limit`; clamped to the vehicle-reported `[charge_limit_soc_min, charge_limit_soc_max]` range
 - **Tesla API Usage** — monthly call counts per category (data, commands, wakes, stream signals) with per-category cost and progress bars against the shared $10 discount budget, estimated net cost
+- **Usage page** — historical charts (cumulative cost, cumulative calls by type, per-snapshot deltas) over selectable ranges (24 h / 7 d / 30 d / all)
 - **History** — paginated readings with interval aggregation (raw / hourly / daily)
-- **Sessions** — charge session list with start/end times, energy, peak amps
-- **Search** — full-text search across events using SQLite FTS5
+- **Sessions** — charge-session list with start/end times, energy, peak amps
+- **Events** — full-text search across events using SQLite FTS5
+
+The SPA acquires an ID token via MSAL.js and attaches `Authorization: Bearer …` to every protected request. Live updates flow over an SSE stream at `/events`.
 
 ### API Endpoints
 
+All `/api/*` and `/events` routes require a valid Microsoft Entra ID ID token whose `oid` claim is listed in `ENTRA_ALLOWED_OIDS`. Public routes are explicitly marked.
+
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/` | Basic auth | HTML dashboard |
-| `GET` | `/api/state` | Basic auth | Current controller snapshot (JSON) |
-| `GET` | `/events` | Basic auth | SSE stream of state updates |
-| `POST` | `/api/control` | Basic auth | Manual commands: `start`, `stop`, `set_amps` |
-| `POST` | `/api/mode` | Basic auth | Switch between `auto` and `manual` mode |
-| `GET` | `/api/history` | Basic auth | Paginated readings (`from`, `to`, `interval`, `limit`, `offset`) |
-| `GET` | `/api/sessions` | Basic auth | Paginated charge sessions |
-| `GET` | `/api/events` | Basic auth | Paginated events |
-| `GET` | `/api/search` | Basic auth | Full-text search (`q`, `from`, `to`, `limit`) |
-| `GET` | `/api/usage` | Basic auth | Current month's Tesla API usage counters and cost (JSON) |
-| `GET` | `/api/usage/history` | Basic auth | Historical API usage snapshots (`from`, `to`, `limit`) |
+| `GET` | `/` | Public (SPA) | React dashboard bundle |
+| `GET` | `/api/state` | Entra ID | Current controller snapshot (JSON) |
+| `GET` | `/events` | Entra ID | SSE stream of state updates |
+| `POST` | `/api/control` | Entra ID | Manual commands: `start`, `stop`, `setAmps` |
+| `POST` | `/api/mode` | Entra ID | Switch between `auto` and `manual` mode |
+| `POST` | `/api/refresh` | Entra ID | Force re-poll Tesla and clear cooldowns |
+| `POST` | `/api/charge-limit` | Entra ID | Set vehicle `charge_limit_soc` (`{percent: N}`) |
+| `GET` | `/api/history` | Entra ID | Paginated readings (`from`, `to`, `interval`, `limit`, `offset`) |
+| `GET` | `/api/sessions` | Entra ID | Paginated charge sessions |
+| `GET` | `/api/events` | Entra ID | Paginated events |
+| `GET` | `/api/search` | Entra ID | Full-text search (`q`, `from`, `to`, `limit`) |
+| `GET` | `/api/usage` | Entra ID | Current month's Tesla API usage counters and cost (JSON) |
+| `GET` | `/api/usage/history` | Entra ID | Historical API usage snapshots (`from`, `to`, `limit`) |
 | `GET` | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Public | Tesla public key endpoint for app/domain verification |
-| `GET` | `/auth/tesla` | Basic auth | Starts Tesla OAuth2 authorization code flow |
+| `GET` | `/auth/tesla` | Entra ID | Starts Tesla OAuth2 authorization code flow |
 | `GET` | `/auth/tesla/callback` | Public | OAuth2 callback endpoint for code exchange |
 | `GET` | `/healthz` | Public | Health check (returns 200) |
 
@@ -667,8 +721,15 @@ All configuration is via environment variables:
 | `TESLA_PUBLIC_KEY_PEM_PATH` | Yes | `/secrets/com.tesla.3p.public-key.pem` | Path to Tesla app public key served via `/.well-known` |
 | `TESLA_REGION` | No | `na` | Fleet API region: `na`, `eu`, `cn` |
 | `TESLA_SCOPE` | No | `openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds` | OAuth scopes requested at `/auth/tesla` |
-| `OAUTH_STATE_HMAC_KEY` | Yes | — | HMAC key used to sign OAuth state cookie |
+| `OAUTH_STATE_HMAC_KEY` | Yes | — | HMAC key used to sign Tesla OAuth state cookie |
 | `TESLA_TOKEN_PATH` | No | `/data/tesla-refresh-token` | File path for persisted Tesla refresh token |
+| `TESLA_COMMAND_BASE` | When using the proxy | — | Base URL of the `tesla-http-proxy` sidecar (typically `https://tesla-http-proxy:4443`) |
+| `TESLA_PROXY_CA_FILE` | When using the proxy | — | Path to the proxy's self-signed TLS cert, e.g. `/secrets/proxy-tls-cert.pem` |
+| `ENTRA_TENANT_ID` | Yes | — | Microsoft Entra tenant GUID |
+| `ENTRA_CLIENT_ID` | Yes | — | Microsoft Entra app registration client ID |
+| `ENTRA_ALLOWED_OIDS` | Yes | — | Comma-separated list of user OIDs allowed to sign in |
+| `VITE_ENTRA_TENANT_ID` | Yes (build-time) | — | Same tenant GUID, baked into the SPA at Docker build time |
+| `VITE_ENTRA_CLIENT_ID` | Yes (build-time) | — | Same client ID, baked into the SPA at Docker build time |
 | `POLL_INTERVAL_SECONDS` | No | `10` | Seconds between control loop ticks |
 | `MIN_CHARGE_AMPS` | No | `5` | Minimum amps to start/continue charging |
 | `MAX_CHARGE_AMPS` | No | `32` | Maximum amp limit sent to vehicle |
@@ -680,8 +741,6 @@ All configuration is via environment variables:
 | `TESLA_CHARGING_POLL_SECONDS` | No | `60` | Seconds between Tesla API polls while charging |
 | `TESLA_IDLE_POLL_SECONDS` | No | `300` | Seconds between Tesla API polls when idle with surplus |
 | `AMPS_CHANGE_THRESHOLD` | No | `2` | Minimum amp change to send a `SetChargingAmps` command |
-| `HTTP_AUTH_USER` | Yes | — | HTTP basic auth username for the dashboard and API |
-| `HTTP_AUTH_PASSWORD` | Yes | — | HTTP basic auth password for the dashboard and API |
 | `HTTP_HOST` | No | `0.0.0.0` | Bind address for the HTTP listener |
 | `HTTP_PORT` | No | `8080` | Web server port inside the container |
 | `TLS_ENABLED` | No | `false` | Enable HTTPS listener with Let's Encrypt autocert (set `false` when DSM terminates TLS) |

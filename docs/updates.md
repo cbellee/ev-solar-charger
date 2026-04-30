@@ -261,3 +261,167 @@ New files and directories currently in the working tree:
 - `function/publickey/function.json`
 - `infra/main.bicep`
 - `internal/tesla/testmode.go`
+---
+
+# Updates — 2026-05-01
+
+The following changes were made between 2026-04-27 and 2026-05-01 (commits `adaed02..ad0fe7c`). Listed in roughly chronological order.
+
+## 10. Web UI rewritten in React + TypeScript + Tailwind
+
+**Commit:** `28f2d86` (and follow-ups `cb7634f`, `6d795ff`)
+
+The legacy server-rendered htmx/Tailwind dashboard was replaced with a Vite-built React + TypeScript SPA under `web/src/`. The Go server now embeds the built `web/dist/` assets and serves them from `/`.
+
+- React Router with pages: Dashboard, History, Sessions, Events, Usage.
+- TanStack Query for data fetching, MSAL.js for auth.
+- All `/api/*` endpoints continue to return JSON; `/events` continues to push SSE.
+- Build is wired into the Docker image — see `Dockerfile` and the GitHub Actions workflow.
+- `VITE_ENTRA_TENANT_ID` and `VITE_ENTRA_CLIENT_ID` are injected at SPA build time via Docker build args (`6d795ff`).
+
+> The `internal/web/templates/index.html` reference in earlier sections of this document is obsolete; the Go templates path has been removed.
+
+## 11. Authentication migrated from Basic Auth to Entra ID (OAuth/OIDC)
+
+**Commit:** `5817d08`
+
+`HTTP_AUTH_USER`/`HTTP_AUTH_PASSWORD` are gone. The dashboard authenticates users with Microsoft Entra ID via MSAL.js; the Go backend validates ID tokens and enforces an OID allow-list on every protected route.
+
+### New env vars
+
+| Variable | Required | Description |
+|---|---|---|
+| `ENTRA_TENANT_ID` | Yes | Entra tenant GUID |
+| `ENTRA_CLIENT_ID` | Yes | App registration client ID |
+| `ENTRA_ALLOWED_OIDS` | Yes | Comma-separated list of user OID GUIDs allowed to sign in |
+| `VITE_ENTRA_TENANT_ID` | Yes (build-time) | Same tenant GUID, baked into the SPA |
+| `VITE_ENTRA_CLIENT_ID` | Yes (build-time) | Same client ID, baked into the SPA |
+
+`HTTP_AUTH_USER` and `HTTP_AUTH_PASSWORD` should be removed from `.env`.
+
+The frontend acquires an ID token via MSAL and attaches it as `Authorization: Bearer ...` to every API and SSE request. The backend validates issuer, audience, signature, and OID membership.
+
+## 12. Tesla OAuth bootstrap brought in-app
+
+**Commits:** `3b3fdf9`, `7353b35`, `a4c754d`, `e8d6ca0`
+
+Replaced the standalone Azure Functions Tesla OAuth helper (now removed — see #18) with a built-in `/auth/tesla` flow served by the Go app itself.
+
+- `internal/web/oauth.go` implements the authorization-code flow.
+- State cookies are HMAC-signed with `OAUTH_STATE_HMAC_KEY`.
+- Tesla credentials are required even when `TESLA_TEST_MODE=true` so the bootstrap can run before flipping into live mode (`7353b35`).
+- Removed non-standard authorize parameters that Tesla rejected (`a4c754d`).
+- The OAuth callback is reachable in test mode so the very first refresh token can be obtained without needing a working vehicle connection (`e8d6ca0`).
+- Initial token refresh failures at startup are logged but no longer fatal (`f0e025b`) — the app boots into stub mode and lets the user re-bootstrap via `/auth/tesla`.
+
+## 13. Tesla Vehicle Command Protocol via tesla-http-proxy sidecar
+
+**Commits:** `fdf6c16`, `7b29672`
+
+Newer Tesla firmware rejects unsigned charge commands with HTTP 403. We now run the official `tesla/vehicle-command:latest` proxy as a Docker Compose sidecar that signs commands with the fleet private key and forwards them to Tesla.
+
+- New service in `docker-compose.yml`: `tesla-http-proxy` listening on `:4443` with TLS.
+- `internal/tesla/client.go` routes `command/*` and `wake_up` paths through the proxy when `TESLA_COMMAND_BASE` is set; vehicle-data reads still go directly to the Fleet API.
+
+### New env vars
+
+| Variable | Required | Description |
+|---|---|---|
+| `TESLA_COMMAND_BASE` | When using the proxy | e.g. `https://tesla-http-proxy:4443` |
+| `TESLA_PROXY_CA_FILE` | When using the proxy | Path to the proxy's self-signed cert, e.g. `/secrets/proxy-tls-cert.pem` |
+
+The proxy needs three files in `./secrets/`: `fleet-key.pem` (existing), `proxy-tls-key.pem`, and `proxy-tls-cert.pem` (the proxy's own TLS keypair).
+
+## 14. Throttle EV down when charging causes grid import
+
+**Commit:** `efb0646`
+
+Previously, while charging, the surplus calculation used the inverter's `surplusWatts` reading which was clamped to ≥ 0. If the EV's draw exceeded available solar, the controller never noticed the grid import and stayed at the same amps. The calculation now uses signed `gridWatts` (negative when exporting, positive when importing) when the car is in `Charging` state, so over-draw correctly reduces the target amps.
+
+## 15. Robust SQLite timestamp parsing
+
+**Commit:** `d767db0`
+
+`modernc.org/sqlite` returns datetime values with several formats (`T`-separator, optional fractional seconds). The events / sessions / api-usage queries now use a multi-format parser (`parseStoredTime` in `internal/storage/sqlite.go`), so the dashboard no longer renders timestamps as `01/01/1`.
+
+## 16. Tesla API usage — historical Usage page
+
+**Commit:** `863f854`
+
+Added a new top-level `/usage` page rendering three recharts charts:
+
+- Cumulative cost over selectable range (24 h / 7 d / 30 d / all).
+- Cumulative call counts by category.
+- Per-snapshot deltas.
+
+Backed by `GET /api/usage/history` (already existed; now consumed by the SPA). Supplements the existing live "Tesla API Usage (this month)" card on the dashboard.
+
+## 17. Tesla API usage counters survive restarts
+
+**Commits:** `08517b9`, `33fe802`
+
+Counters were resetting to zero on every container restart. Two coordinated fixes:
+
+- **Restore on startup (`08517b9` initial, `33fe802` final form):** at boot, `cmd/server/main.go` queries all `api_usage_snapshots` rows from the start of the current calendar month and seeds the in-memory tracker with the **maximum** of each counter. Counters are monotonic within a month, so max is correct and immune to spurious zero rows already in the database from earlier stub-mode periods.
+- **Skip persisting zero snapshots from stub mode:** the controller's `flushMinuteAverage` now refuses to insert rows when `APIUsage.MonthStarted.IsZero()` (the stub controller's signature value), so a stub-mode restart can no longer poison the history with zero-count rows that would defeat the max-restore logic.
+
+## 18. Reduce wasted Tesla wake commands
+
+**Commit:** `8f770ee`
+
+Three coordinated changes drastically reduce wake spam (we observed ~14 wakes/3.5 h in the prior behaviour, ~6 of which ended in "Disconnected is not actionable" and ~8 in transient surplus collapse):
+
+1. **Plug-state derivation (`internal/tesla/client.go`):** `PluggedIn` now requires both `charge_port_latch == "Engaged"` *and* `charging_state != "Disconnected"`. The latch can briefly remain `Engaged` after the cable is removed; trusting it alone caused repeated wake attempts on a car that wasn't plugged in.
+2. **Non-actionable backoff (`internal/controller/controller.go`):** new field `lastNonActionableAt` is stamped whenever an online tick reports the car as `Disconnected`, `Complete`, or with `PluggedIn=false`. `shouldAttemptWake` returns false while inside the configurable backoff window. The timestamp clears as soon as an online tick confirms an actionable plug state, and `ForceRefresh` resets it.
+3. **Surplus margin for wake:** new gate `availableAmps >= MinChargeAmps + WakeMinAmpsMargin` for the offline branch of step 6 in `Tick`. Wakes take ~30 s and borderline surplus often collapses during that time, so a small margin avoids a class of doomed wakes followed immediately by `waiting for surplus`.
+
+### New env vars
+
+| Variable | Default | Description |
+|---|---|---|
+| `WAKE_MIN_AMPS_MARGIN` | `2` | Extra amps above `MIN_CHARGE_AMPS` required to initiate a wake |
+| `WAKE_AFTER_NON_ACTIONABLE_BACKOFF_SECONDS` | `1800` | Suppress wakes for this many seconds after observing a non-actionable plug state |
+
+## 19. Always poll Tesla on idle interval to detect external charge starts
+
+**Commit:** `3d05f33`
+
+The `default` branch of `shouldPollTesla` previously skipped polling when surplus was below `MinChargeAmps`. If the user started a charge from the Tesla app (or a scheduled charge fired) under those conditions, the controller never noticed: cached state stayed `Stopped`, no `StopCharging` was sent, and the EV silently drew from the grid. The branch now polls on `TeslaIdlePollInterval` regardless of surplus, so out-of-band state changes are detected within ~5 min.
+
+## 20. Charge-limit slider on the dashboard
+
+**Commits:** `9c5a01c`, `ad0fe7c`
+
+Added a "Charge Limit" card with a range slider that controls the vehicle's `charge_limit_soc`.
+
+- `internal/tesla` — extended `ChargeState` with `ChargeLimit`, `ChargeLimitMin`, `ChargeLimitMax` parsed from `charge_state.charge_limit_soc{,_min,_max}`. Added `SetChargeLimit(ctx, percent int) error` to the `VehicleController` interface, real client (routed through the VCP proxy), and the test-mode stub.
+- `internal/controller` — surfaces all three fields on `StateSnapshot`; exposes `SetChargeLimit` (range-checked to `[50,100]`), available in both Auto and Manual modes since it's a vehicle setting rather than a charge command.
+- `internal/web` — `POST /api/charge-limit` accepting `{percent: N}`.
+- `web/src/components/ChargeLimitCard.tsx` — slider that submits on release (mouse-up / touch-end / key-up) so we don't spam the API mid-drag.
+- The current charge limit is also shown on the EV Charging card.
+- Bumped the power-flow `<svg>` `viewBox` height from 320 to 360 so the EV node label and live status text render below the icon (`ad0fe7c`).
+
+## 21. Removed Azure Functions OAuth helper and Bicep infrastructure
+
+**Commits:** `5a2df0f`, `a842df3`
+
+The `function/` Azure Functions Tesla OAuth helper and the `infra/main.bicep` scaffold (added in sections 3 and 4 above) were removed in favour of running the OAuth bootstrap directly in the Go app (see #12). The corresponding `function/`, `infra/`, and `.azure/` directories are no longer used by the deployment described in this document.
+
+## 22. Other housekeeping
+
+- `7cb711e`: GitHub Actions workflow added to build and publish the multi-arch container image to `ghcr.io/cbellee/ev-solar-charger:latest` on push to `main`.
+- `0bdc529`: top-level `README.md` added.
+- `b1098bd`: critical security fixes (refresh-token storage hardening, redirect URI checks, body-size limits, generic error responses on the OAuth callback).
+- `5a2df0f`: documentation moved into `docs/`.
+- `3cb1a28`: project folder renamed from `solar-ev-charger-controller` to `ev-solar-charger`.
+
+## Verification
+
+```bash
+go test ./...       # all packages green
+cd web && npm run build  # SPA builds clean
+```
+
+## Outstanding doc drift
+
+The Part A deployment guide and the Configuration Reference table in `instructions.md` were updated alongside this changelog to remove `HTTP_AUTH_*` references, document the Entra ID env vars, and describe the tesla-http-proxy sidecar. Earlier paragraphs in this `updates.md` that mention `internal/web/templates/index.html`, the Azure Functions helper, or basic-auth-protected endpoints are retained as historical record but are no longer accurate descriptions of the running system.
