@@ -759,8 +759,14 @@ func (c *Controller) flushMinuteAverage(ctx context.Context) {
 		c.logger.ErrorContext(ctx, "failed to persist reading", "error", err)
 	}
 
-	// Persist API usage snapshot for historical analysis.
+	// Persist API usage snapshot for historical analysis. Skip when the
+	// vehicle controller has no real counters (e.g. test/stub mode after a
+	// failed token bootstrap) so we don't overwrite legitimate prior counts
+	// with zeros that would break startup restoration.
 	usage := c.vehicle.GetAPIUsage()
+	if usage.MonthStarted.IsZero() {
+		return
+	}
 	usageSnap := storage.APIUsageSnapshot{
 		Timestamp:     minute,
 		DataCalls:     usage.DataCalls,
