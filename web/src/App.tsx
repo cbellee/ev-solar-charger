@@ -9,7 +9,7 @@ import UsagePage from "@/pages/UsagePage";
 import { SignOutButton } from "@/auth/AuthProvider";
 
 export default function App() {
-  const { status, snapshot } = useStateStream();
+  const { status, snapshot, error } = useStateStream();
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100">
@@ -56,13 +56,18 @@ export default function App() {
                   "h-2 w-2 rounded-full",
                   status === "open"
                     ? "bg-green-400"
-                    : status === "error"
+                    : status === "error" || status === "auth-error"
                       ? "bg-red-500"
                       : "bg-amber-400 animate-pulse",
                 )}
               />
-              {status}
+              {status === "auth-error" ? "auth required" : status}
             </span>
+            {error && status !== "open" && (
+              <span className="max-w-xs truncate text-red-300" title={error}>
+                {error}
+              </span>
+            )}
             <SignOutButton />
           </div>
         </div>

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/api/client";
+import { api, getErrorMessage } from "@/api/client";
 import { Card } from "./Card";
 import clsx from "clsx";
 
@@ -14,7 +14,7 @@ export function APIUsageCard() {
   return (
     <Card title="Tesla API Usage (this month)">
       {isLoading && <p className="text-xs text-gray-500">Loading…</p>}
-      {error && <p className="text-xs text-red-400">{(error as Error).message}</p>}
+      {error && <p className="text-xs text-red-400">{getErrorMessage(error)}</p>}
       {data && (
         <div className="space-y-3">
           <UsageBar label="Data" calls={data.dataCalls} cost={data.dataCost} budget={data.monthlyDiscount / 4} />

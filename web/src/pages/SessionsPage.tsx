@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/api/client";
+import { api, getErrorMessage } from "@/api/client";
 import { Card } from "@/components/Card";
 
 export default function SessionsPage() {
@@ -11,7 +11,7 @@ export default function SessionsPage() {
   return (
     <Card title="Charge Sessions (last 30 days)">
       {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
-      {error && <p className="text-sm text-red-400">{(error as Error).message}</p>}
+      {error && <p className="text-sm text-red-400">{getErrorMessage(error)}</p>}
       {data && data.length === 0 && <p className="text-sm text-gray-400">No sessions yet.</p>}
       {data && data.length > 0 && (
         <div className="overflow-x-auto">

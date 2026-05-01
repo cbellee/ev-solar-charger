@@ -54,13 +54,18 @@ func (fakeStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit in
 func (fakeStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (fakeStore) Close() error                                                      { return nil }
 
-type fakeInverter struct{}
+type fakeInverter struct {
+	closeCalls int
+}
 
-func (fakeInverter) Connect(ctx context.Context) error { return nil }
-func (fakeInverter) GetPowerData(ctx context.Context) (inverter.PowerData, error) {
+func (f *fakeInverter) Connect(ctx context.Context) error { return nil }
+func (f *fakeInverter) GetPowerData(ctx context.Context) (inverter.PowerData, error) {
 	return inverter.PowerData{}, nil
 }
-func (fakeInverter) Close() error { return nil }
+func (f *fakeInverter) Close() error {
+	f.closeCalls++
+	return nil
+}
 
 type fakeVehicle struct{}
 
@@ -112,7 +117,7 @@ func testDeps(cfg config.Config) runtimeDeps {
 		newMetrics: func() (*observability.Metrics, error) { return nil, nil },
 		newStore:   func(dbPath string, logger *slog.Logger) (storage.Store, error) { return fakeStore{}, nil },
 		newInverter: func(host string, port int, logger *slog.Logger, metrics *observability.Metrics) inverter.InverterReader {
-			return fakeInverter{}
+			return &fakeInverter{}
 		},
 		newVehicle: func(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) (tesla.VehicleController, error) {
 			return fakeVehicle{}, nil
@@ -325,5 +330,24 @@ func Test_runWithContext_testModeSkipsTeslaClientCreation(t *testing.T) {
 	}
 	if called {
 		t.Fatal("expected Tesla client creation to be skipped in test mode")
+	}
+}
+
+func Test_runWithContext_closesInverterOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cfg := testConfig(0)
+	deps := testDeps(cfg)
+	fakeInv := &fakeInverter{}
+	deps.newInverter = func(host string, port int, logger *slog.Logger, metrics *observability.Metrics) inverter.InverterReader {
+		return fakeInv
+	}
+
+	if err := runWithContext(ctx, deps); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fakeInv.closeCalls != 1 {
+		t.Fatalf("closeCalls = %d, want 1", fakeInv.closeCalls)
 	}
 }

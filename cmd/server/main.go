@@ -169,6 +169,14 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 
 	// 6. Create inverter client.
 	inv := deps.newInverter(cfg.SungrowHost, cfg.SungrowPort, logger, metrics)
+	defer func() {
+		if inv == nil {
+			return
+		}
+		if err := inv.Close(); err != nil {
+			logger.Warn("inverter close failed", "error", err)
+		}
+	}()
 	if err := inv.Connect(ctx); err != nil {
 		logger.Warn("inverter connect failed (will retry)", "error", err)
 	}

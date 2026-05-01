@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { api } from "@/api/client";
+import { api, getErrorMessage } from "@/api/client";
 import type { HistoryInterval } from "@/api/types";
 import { Card } from "@/components/Card";
 
@@ -66,7 +66,7 @@ export default function HistoryPage() {
         </div>
 
         {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
-        {error && <p className="text-sm text-red-400">{(error as Error).message}</p>}
+  {error && <p className="text-sm text-red-400">{getErrorMessage(error)}</p>}
 
         {chartData.length > 0 && (
           <div className="h-72 w-full">

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/api/client";
+import { api, getErrorMessage } from "@/api/client";
 import type { StateSnapshot } from "@/api/types";
 import { PowerFlowDiagram } from "@/components/PowerFlowDiagram";
 import { Card } from "@/components/Card";
@@ -19,7 +19,7 @@ export default function DashboardPage() {
   });
 
   if (isLoading) return <p className="text-sm text-gray-400">Loading…</p>;
-  if (error) return <p className="text-sm text-red-400">{(error as Error).message}</p>;
+  if (error) return <p className="text-sm text-red-400">{getErrorMessage(error)}</p>;
   if (!snap) return null;
 
   return (
