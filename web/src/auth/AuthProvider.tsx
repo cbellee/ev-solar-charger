@@ -19,13 +19,11 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   const getIdToken = useIdToken();
 
   useEffect(() => {
-    setTokenGetter(async () => {
-      try {
-        return await getIdToken();
-      } catch {
-        return null;
-      }
-    });
+    setTokenGetter(getIdToken);
+
+    return () => {
+      setTokenGetter(async () => null);
+    };
   }, [getIdToken]);
 
   useEffect(() => {

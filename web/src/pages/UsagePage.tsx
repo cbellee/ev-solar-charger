@@ -12,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { api } from "@/api/client";
+import { api, getErrorMessage } from "@/api/client";
 import { Card } from "@/components/Card";
 
 type Range = "24h" | "7d" | "30d" | "all";
@@ -112,7 +112,7 @@ export default function UsagePage() {
 
         {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
         {error && (
-          <p className="text-sm text-red-400">{(error as Error).message}</p>
+          <p className="text-sm text-red-400">{getErrorMessage(error)}</p>
         )}
 
         {chartData.length > 0 && (

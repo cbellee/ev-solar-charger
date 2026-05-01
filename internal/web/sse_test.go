@@ -18,6 +18,13 @@ type nonFlusherResponseWriter struct {
 	body   strings.Builder
 }
 
+type streamingResponseWriter struct {
+	mu     sync.Mutex
+	header http.Header
+	status int
+	body   strings.Builder
+}
+
 func (w *nonFlusherResponseWriter) Header() http.Header {
 	if w.header == nil {
 		w.header = make(http.Header)
@@ -34,6 +41,38 @@ func (w *nonFlusherResponseWriter) Write(data []byte) (int, error) {
 
 func (w *nonFlusherResponseWriter) WriteHeader(statusCode int) {
 	w.status = statusCode
+}
+
+func (w *streamingResponseWriter) Header() http.Header {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *streamingResponseWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(data)
+}
+
+func (w *streamingResponseWriter) WriteHeader(statusCode int) {
+	w.mu.Lock()
+	w.status = statusCode
+	w.mu.Unlock()
+}
+
+func (w *streamingResponseWriter) Flush() {}
+
+func (w *streamingResponseWriter) BodyString() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.String()
 }
 
 func Test_Hub_subscribeBroadcastReceive(t *testing.T) {
@@ -119,8 +158,11 @@ func Test_Hub_serveHTTP_streamsEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	req := httptest.NewRequest(http.MethodGet, "/events", nil).WithContext(ctx)
-	w := httptest.NewRecorder()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/events", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	w := &streamingResponseWriter{}
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -145,9 +187,9 @@ func Test_Hub_serveHTTP_streamsEvents(t *testing.T) {
 
 	hub.Broadcast(controller.StateSnapshot{State: controller.StateCharging})
 	deadline = time.Now().Add(time.Second)
-	for !strings.Contains(w.Body.String(), "charging") {
+	for !strings.Contains(w.BodyString(), "charging") {
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for SSE body, got %q", w.Body.String())
+			t.Fatalf("timed out waiting for SSE body, got %q", w.BodyString())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -158,8 +200,8 @@ func Test_Hub_serveHTTP_streamsEvents(t *testing.T) {
 	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
 	}
-	if !strings.Contains(w.Body.String(), "data: ") {
-		t.Fatalf("expected SSE data frame, got %q", w.Body.String())
+	if !strings.Contains(w.BodyString(), "data: ") {
+		t.Fatalf("expected SSE data frame, got %q", w.BodyString())
 	}
 }
 

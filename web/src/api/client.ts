@@ -12,10 +12,41 @@ import type {
 
 // TokenGetter is supplied by the React tree (typically via useIdToken) so the
 // fetch helpers don't have to depend on MSAL directly. Returning null disables
-// the Authorization header (useful for tests).
+// the Authorization header (useful for tests); throwing surfaces auth failures
+// to the caller instead of silently degrading to unauthenticated requests.
 export type TokenGetter = () => Promise<string | null>;
 
 let getToken: TokenGetter = async () => null;
+
+export class AuthError extends Error {
+  constructor(message = "Sign in again to continue.") {
+    super(message);
+    this.name = "AuthError";
+  }
+}
+
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim() !== "") {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim() !== "") {
+    return error;
+  }
+  return "Unexpected error";
+}
+
+function toAuthError(error: unknown): AuthError {
+  if (error instanceof AuthError) {
+    return error;
+  }
+
+  const message = getErrorMessage(error);
+  if (message === "no signed-in account") {
+    return new AuthError("Sign in again to continue.");
+  }
+
+  return new AuthError(message);
+}
 
 export function setTokenGetter(fn: TokenGetter): void {
   getToken = fn;
@@ -26,7 +57,13 @@ export function currentTokenGetter(): TokenGetter {
 }
 
 async function jsonFetch<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
-  const token = await getToken();
+  let token: string | null;
+  try {
+    token = await getToken();
+  } catch (error) {
+    throw toAuthError(error);
+  }
+
   const baseHeaders: Record<string, string> = {
     Accept: "application/json",
     ...(init?.body ? { "Content-Type": "application/json" } : {}),
@@ -49,6 +86,11 @@ async function jsonFetch<T>(input: RequestInfo, init?: RequestInit): Promise<T> 
     } catch {
       // ignore parse failures
     }
+
+    if (res.status === 401 || res.status === 403) {
+      throw new AuthError(message);
+    }
+
     throw new Error(message);
   }
   return (await res.json()) as T;
