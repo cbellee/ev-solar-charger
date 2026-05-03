@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/cbellee/ev-solar-charger/internal/config"
-	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
 
 const (
@@ -36,8 +35,10 @@ var audienceByRegion = map[string]string{
 }
 
 type oauthServer struct {
-	cfg        config.Config
-	vehicle    tesla.VehicleController
+	cfg       config.Config
+	activator interface {
+		SetRefreshToken(context.Context, string) error
+	}
 	httpClient *http.Client
 	logger     *slog.Logger
 }
@@ -48,14 +49,16 @@ type oauthTokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 }
 
-func newOAuthServer(cfg config.Config, vehicle tesla.VehicleController, logger *slog.Logger) *oauthServer {
+func newOAuthServer(cfg config.Config, activator interface {
+	SetRefreshToken(context.Context, string) error
+}, logger *slog.Logger) *oauthServer {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &oauthServer{
-		cfg:     cfg,
-		vehicle: vehicle,
-		logger:  logger,
+		cfg:       cfg,
+		activator: activator,
+		logger:    logger,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -154,14 +157,17 @@ func (s *oauthServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.vehicle.SetRefreshToken(r.Context(), tokens.RefreshToken); err != nil {
+	if err := s.activator.SetRefreshToken(r.Context(), tokens.RefreshToken); err != nil {
 		s.logger.Error("oauth: activate refresh token", "error", err)
 		renderOAuthHTML(w, http.StatusBadGateway, "Token activation failed", "Could not activate the Tesla refresh token. See server logs for details.")
 		return
 	}
+	if refresher, ok := s.activator.(interface{ ForceRefresh(context.Context) }); ok {
+		refresher.ForceRefresh(r.Context())
+	}
 
 	http.SetCookie(w, expiredStateCookie(s.secureCookies()))
-	renderOAuthHTML(w, http.StatusOK, "Tesla authorization complete", fmt.Sprintf("Refresh token saved to %s and activated.", s.cfg.TeslaTokenPath))
+	renderOAuthHTML(w, http.StatusOK, "Tesla authorization complete", fmt.Sprintf("Refresh token saved to %s, activated, and a live refresh was requested.", s.cfg.TeslaTokenPath))
 }
 
 func (s *oauthServer) buildAuthorizeURL(state string) (string, error) {

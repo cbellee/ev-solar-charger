@@ -32,7 +32,7 @@ var denyAuth = AuthenticatorFunc(func(_ http.Handler) http.Handler {
 })
 
 func Test_NewServer_requiresAuthForProtectedRoutes(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/state", nil)
 	w := httptest.NewRecorder()
@@ -47,7 +47,7 @@ func Test_NewServer_requiresAuthForProtectedRoutes(t *testing.T) {
 }
 
 func Test_NewServer_allowsHealthzWithoutAuth(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig())
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -59,7 +59,7 @@ func Test_NewServer_allowsHealthzWithoutAuth(t *testing.T) {
 }
 
 func Test_NewServer_allowsProtectedRoutesWithAuth(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, NoopAuthenticator{}, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, NoopAuthenticator{}, oauthTestConfig())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/state", nil)
 	w := httptest.NewRecorder()
@@ -71,7 +71,7 @@ func Test_NewServer_allowsProtectedRoutesWithAuth(t *testing.T) {
 }
 
 func Test_NewServer_allowsOAuthStartWithoutAuth(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig())
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/tesla", nil)
 	w := httptest.NewRecorder()
@@ -83,7 +83,7 @@ func Test_NewServer_allowsOAuthStartWithoutAuth(t *testing.T) {
 }
 
 func Test_NewServer_allowsPublicKeyEndpointWithoutAuth(t *testing.T) {
-	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig(), &nullVehicle{})
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig())
 
 	req := httptest.NewRequest(http.MethodGet, "/.well-known/appspecific/com.tesla.3p.public-key.pem", nil)
 	w := httptest.NewRecorder()

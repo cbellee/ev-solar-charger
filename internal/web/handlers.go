@@ -354,7 +354,9 @@ func handleAPIUsage(ctrl *controller.Controller) http.HandlerFunc {
 			EstimatedCost:   usage.EstimatedCost,
 			MonthlyDiscount: monthlyCredit,
 			NetCost:         net,
-			MonthStarted:    usage.MonthStarted.Format("2006-01-02"),
+		}
+		if !usage.MonthStarted.IsZero() {
+			resp.MonthStarted = usage.MonthStarted.Format("2006-01-02")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)

@@ -27,28 +27,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Run Go tests with race detection and coverage
-        run: go test -race -coverprofile=coverage.out ./...
-
-      - name: Print Go coverage summary
-        run: go tool cover -func=coverage.out
-
-      - name: Upload Go coverage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: go-coverage
-          path: coverage.out
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -69,13 +51,31 @@ jobs:
           VITE_ENTRA_TENANT_ID: ${{ env.VITE_ENTRA_TENANT_ID }}
           VITE_ENTRA_CLIENT_ID: ${{ env.VITE_ENTRA_CLIENT_ID }}
 
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run Go tests with race detection and coverage
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Print Go coverage summary
+        run: go tool cover -func=coverage.out
+
+      - name: Upload Go coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage.out
+
   container:
     needs: verify
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
