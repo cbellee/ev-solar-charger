@@ -9,10 +9,11 @@ import (
 
 // Sentinel errors for known vehicle states.
 var (
-	ErrCarOffline       = errors.New("tesla: vehicle is offline")
-	ErrNotPluggedIn     = errors.New("tesla: vehicle is not plugged in")
-	ErrNotCharging      = errors.New("tesla: vehicle is not charging")
-	ErrCommandsDisabled = errors.New("tesla: commands disabled in test mode")
+	ErrCarOffline         = errors.New("tesla: vehicle is offline")
+	ErrVehicleUnavailable = errors.New("tesla: vehicle client unavailable")
+	ErrNotPluggedIn       = errors.New("tesla: vehicle is not plugged in")
+	ErrNotCharging        = errors.New("tesla: vehicle is not charging")
+	ErrCommandsDisabled   = errors.New("tesla: commands disabled in test mode")
 )
 
 // ChargeState holds the vehicle's current charging information.

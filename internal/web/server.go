@@ -7,7 +7,6 @@ import (
 	"github.com/cbellee/ev-solar-charger/internal/config"
 	"github.com/cbellee/ev-solar-charger/internal/controller"
 	"github.com/cbellee/ev-solar-charger/internal/storage"
-	"github.com/cbellee/ev-solar-charger/internal/tesla"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -19,7 +18,7 @@ import (
 //     prompt to first-time visitors.
 //   - Protected by `auth`: /api/* and /events (SSE). The React app attaches an
 //     ID token via Authorization: Bearer (or ?access_token= for SSE).
-func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logger *slog.Logger, auth Authenticator, cfg config.Config, vehicle tesla.VehicleController) http.Handler {
+func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logger *slog.Logger, auth Authenticator, cfg config.Config) http.Handler {
 	apiMux := http.NewServeMux()
 
 	apiMux.HandleFunc("GET /api/state", handleState(ctrl))
@@ -40,7 +39,7 @@ func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logge
 
 	// OAuth routes are always registered so the refresh token can be
 	// bootstrapped via /auth/tesla even when TESLA_TEST_MODE=true.
-	oauth := newOAuthServer(cfg, vehicle, logger)
+	oauth := newOAuthServer(cfg, ctrl, logger)
 	rootMux.HandleFunc("GET /.well-known/appspecific/com.tesla.3p.public-key.pem", oauth.handlePublicKey)
 	rootMux.HandleFunc("GET /auth/tesla", oauth.handleOAuthStart)
 	rootMux.HandleFunc("GET /auth/tesla/callback", oauth.handleOAuthCallback)

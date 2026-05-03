@@ -566,6 +566,9 @@ func Test_handleAPIUsage_returnsUsageData(t *testing.T) {
 	if resp.NetCost != 0 {
 		t.Errorf("NetCost = %f, want 0 (under free tier)", resp.NetCost)
 	}
+	if resp.MonthStarted != "" {
+		t.Errorf("MonthStarted = %q, want empty string for unavailable usage", resp.MonthStarted)
+	}
 }
 
 func Test_handleAPIUsageHistory_returnsSnapshots(t *testing.T) {

@@ -920,3 +920,54 @@ func (c *Controller) GetStateSnapshot() StateSnapshot {
 func (c *Controller) GetAPIUsage() tesla.APIUsage {
 	return c.vehicle.GetAPIUsage()
 }
+
+// SetRefreshToken activates or updates the underlying Tesla controller.
+func (c *Controller) SetRefreshToken(ctx context.Context, refreshToken string) error {
+	if err := c.vehicle.SetRefreshToken(ctx, refreshToken); err != nil {
+		return err
+	}
+
+	usage := c.vehicle.GetAPIUsage()
+	if usage.MonthStarted.IsZero() || usage.DataCalls != 0 || usage.CommandCalls != 0 || usage.WakeCalls != 0 || usage.StreamSignals != 0 {
+		return nil
+	}
+	if c.store == nil {
+		return nil
+	}
+
+	now := time.Now()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	snaps, err := c.store.QueryAPIUsage(ctx, monthStart, now, 100000)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.WarnContext(ctx, "failed to restore api usage after token activation", "error", err)
+		}
+		return nil
+	}
+	if len(snaps) == 0 {
+		return nil
+	}
+
+	var restored tesla.APIUsage
+	for _, snap := range snaps {
+		if snap.DataCalls > restored.DataCalls {
+			restored.DataCalls = snap.DataCalls
+		}
+		if snap.CommandCalls > restored.CommandCalls {
+			restored.CommandCalls = snap.CommandCalls
+		}
+		if snap.WakeCalls > restored.WakeCalls {
+			restored.WakeCalls = snap.WakeCalls
+		}
+		if snap.StreamSignals > restored.StreamSignals {
+			restored.StreamSignals = snap.StreamSignals
+		}
+	}
+	restored.MonthStarted = monthStart
+
+	if restorer, ok := c.vehicle.(interface{ RestoreAPIUsage(tesla.APIUsage) }); ok {
+		restorer.RestoreAPIUsage(restored)
+	}
+
+	return nil
+}

@@ -38,7 +38,7 @@ type runtimeDeps struct {
 	newStore         func(string, *slog.Logger) (storage.Store, error)
 	newInverter      func(string, int, *slog.Logger, *observability.Metrics) inverter.InverterReader
 	newVehicle       func(config.Config, *slog.Logger, *observability.Metrics) (tesla.VehicleController, error)
-	newServer        func(*controller.Controller, storage.Store, *web.Hub, *slog.Logger, web.Authenticator, config.Config, tesla.VehicleController) http.Handler
+	newServer        func(*controller.Controller, storage.Store, *web.Hub, *slog.Logger, web.Authenticator, config.Config) http.Handler
 	newHub           func(*slog.Logger) *web.Hub
 	newAuthenticator func(context.Context, web.EntraConfig) (web.Authenticator, error)
 }
@@ -193,20 +193,24 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 			}
 		}
 		if strings.TrimSpace(cfg.TeslaRefreshToken) == "" {
-			logger.Warn("tesla refresh token missing; running in stub mode until /auth/tesla bootstrap is completed",
+			logger.Warn("tesla refresh token missing; Tesla data unavailable until /auth/tesla bootstrap is completed",
 				"token_path", cfg.TeslaTokenPath)
-			vehicle = tesla.NewTestModeController()
+			vehicle = tesla.NewActivatingController(cfg, logger, metrics,
+				tesla.NewUnavailableController("complete /auth/tesla to activate Tesla telemetry"))
 		} else {
-			vehicle, err = deps.newVehicle(cfg, logger, metrics)
+			var activeVehicle tesla.VehicleController
+			activeVehicle, err = deps.newVehicle(cfg, logger, metrics)
 			if err != nil {
 				// Don't crash the container: an invalid/expired refresh token
 				// would otherwise crash-loop forever and prevent the operator
-				// from re-bootstrapping via /auth/tesla. Fall back to the
-				// stub controller; OAuth callback still writes the new token
-				// to disk for the next restart.
-				logger.Error("tesla client initialization failed; running in stub mode until /auth/tesla bootstrap is completed and the container is restarted",
+				// from re-bootstrapping via /auth/tesla. Keep the process up
+				// and activate the Tesla client after OAuth/bootstrap succeeds.
+				logger.Error("tesla client initialization failed; Tesla data unavailable until /auth/tesla bootstrap succeeds",
 					"error", err, "token_path", cfg.TeslaTokenPath)
-				vehicle = tesla.NewTestModeController()
+				vehicle = tesla.NewActivatingController(cfg, logger, metrics,
+					tesla.NewUnavailableController("Tesla client initialization failed; complete /auth/tesla to reactivate telemetry"))
+			} else {
+				vehicle = tesla.NewActivatingController(cfg, logger, metrics, activeVehicle)
 			}
 		}
 	}
@@ -219,7 +223,7 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	// take the maximum of each counter across all snapshots — this is
 	// immune to zero snapshots written while the container was in stub
 	// mode (e.g. after a refresh-token expiry) overwriting good values.
-	if tc, ok := vehicle.(*tesla.TeslaClient); ok {
+	if restorer, ok := vehicle.(interface{ RestoreAPIUsage(tesla.APIUsage) }); ok {
 		now := time.Now()
 		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		if snaps, qerr := store.QueryAPIUsage(ctx, monthStart, now, 100000); qerr != nil {
@@ -244,7 +248,7 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 					latest = s.Timestamp
 				}
 			}
-			tc.RestoreAPIUsage(tesla.APIUsage{
+			restorer.RestoreAPIUsage(tesla.APIUsage{
 				DataCalls:     maxData,
 				CommandCalls:  maxCmd,
 				WakeCalls:     maxWake,
@@ -279,7 +283,7 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	}
 
 	// 11. Create web server.
-	handler := deps.newServer(ctrl, store, hub, logger, authenticator, cfg, vehicle)
+	handler := deps.newServer(ctrl, store, hub, logger, authenticator, cfg)
 
 	// 11. Start controller loop.
 	go ctrl.Run(ctx)
