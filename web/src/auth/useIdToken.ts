@@ -1,7 +1,12 @@
 import { useCallback } from "react";
 import { useMsal } from "@azure/msal-react";
-import { InteractionRequiredAuthError } from "@azure/msal-browser";
+import {
+  BrowserAuthErrorCodes,
+  InteractionRequiredAuthError,
+} from "@azure/msal-browser";
 import { loginRequest } from "./msalConfig";
+
+let redirectInFlight = false;
 
 // useIdToken returns an async getter that produces a fresh Microsoft Entra
 // ID token for the signed-in account. The Go backend validates this token
@@ -32,8 +37,24 @@ export function useIdToken(): () => Promise<string> {
       return result.idToken;
     } catch (err) {
       if (err instanceof InteractionRequiredAuthError) {
+        if (redirectInFlight) {
+          throw err;
+        }
+
         // Silent refresh failed; force a redirect to re-authenticate.
-        await instance.acquireTokenRedirect(loginRequest);
+        redirectInFlight = true;
+        try {
+          await instance.acquireTokenRedirect(loginRequest);
+        } catch (redirectError) {
+          const errorCode =
+            typeof redirectError === "object" && redirectError !== null && "errorCode" in redirectError
+              ? String(redirectError.errorCode)
+              : "";
+          if (errorCode !== BrowserAuthErrorCodes.interactionInProgress) {
+            redirectInFlight = false;
+          }
+          throw redirectError;
+        }
         // acquireTokenRedirect navigates away; this throw is for type
         // narrowing — control rarely returns here.
         throw err;

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   AuthenticatedTemplate,
   MsalProvider,
@@ -6,6 +6,7 @@ import {
   useMsal,
 } from "@azure/msal-react";
 import {
+  BrowserAuthErrorCodes,
   EventType,
   InteractionStatus,
   PublicClientApplication,
@@ -23,8 +24,9 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   const getIdToken = useIdToken();
   const [ready, setReady] = useState(false);
   const [startupError, setStartupError] = useState<string | null>(null);
+  const loginRedirectStarted = useRef(false);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setTokenGetter(getIdToken);
 
     return () => {
@@ -35,6 +37,9 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   useEffect(() => {
     if (accounts.length > 0 && !instance.getActiveAccount()) {
       instance.setActiveAccount(accounts[0]);
+    }
+    if (accounts.length > 0) {
+      loginRedirectStarted.current = false;
     }
   }, [accounts, instance]);
 
@@ -75,7 +80,22 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
 
   useEffect(() => {
     if (ready && accounts.length === 0 && inProgress === InteractionStatus.None) {
-      void instance.loginRedirect(loginRequest);
+      if (loginRedirectStarted.current) {
+        return;
+      }
+      loginRedirectStarted.current = true;
+      void instance.loginRedirect(loginRequest).catch((error: unknown) => {
+        const errorCode =
+          typeof error === "object" && error !== null && "errorCode" in error
+            ? String(error.errorCode)
+            : "";
+        if (errorCode === BrowserAuthErrorCodes.interactionInProgress) {
+          return;
+        }
+        loginRedirectStarted.current = false;
+        const message = error instanceof Error ? error.message : "Sign-in redirect failed.";
+        setStartupError(message);
+      });
     }
   }, [accounts.length, inProgress, instance, ready]);
 
