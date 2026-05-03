@@ -21,6 +21,8 @@ import { useIdToken } from "./useIdToken";
 function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   const { instance, accounts, inProgress } = useMsal();
   const getIdToken = useIdToken();
+  const [ready, setReady] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
 
   useEffect(() => {
     setTokenGetter(getIdToken);
@@ -37,10 +39,57 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   }, [accounts, instance]);
 
   useEffect(() => {
-    if (accounts.length === 0 && inProgress === InteractionStatus.None) {
+    let disposed = false;
+
+    async function initialize() {
+      try {
+        await instance.initialize();
+        const result = await instance.handleRedirectPromise();
+        if (disposed) {
+          return;
+        }
+        if (result?.account) {
+          instance.setActiveAccount(result.account);
+        } else if (!instance.getActiveAccount()) {
+          const [account] = instance.getAllAccounts();
+          if (account) {
+            instance.setActiveAccount(account);
+          }
+        }
+        setReady(true);
+      } catch (error) {
+        if (disposed) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : "Authentication initialization failed.";
+        setStartupError(message);
+      }
+    }
+
+    void initialize();
+
+    return () => {
+      disposed = true;
+    };
+  }, [instance]);
+
+  useEffect(() => {
+    if (ready && accounts.length === 0 && inProgress === InteractionStatus.None) {
       void instance.loginRedirect(loginRequest);
     }
-  }, [accounts.length, inProgress, instance]);
+  }, [accounts.length, inProgress, instance, ready]);
+
+  if (startupError) {
+    return <AuthConfigError message={startupError} />;
+  }
+
+  if (!ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-slate-300">
+        Loading authentication...
+      </div>
+    );
+  }
 
   return (
     <>
@@ -101,25 +150,8 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
         }
       });
 
-      try {
-        await instance.initialize();
-        const result = await instance.handleRedirectPromise();
-        if (result?.account) {
-          instance.setActiveAccount(result.account);
-        } else if (!instance.getActiveAccount()) {
-          const [account] = instance.getAllAccounts();
-          if (account) {
-            instance.setActiveAccount(account);
-          }
-        }
-        if (!disposed) {
-          setMsalInstance(instance);
-        }
-      } catch (error) {
-        if (!disposed) {
-          const message = error instanceof Error ? error.message : "Authentication initialization failed.";
-          setAuthError(message);
-        }
+      if (!disposed) {
+        setMsalInstance(instance);
       }
     }
 
