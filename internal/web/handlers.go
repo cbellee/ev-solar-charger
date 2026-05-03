@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cbellee/ev-solar-charger/internal/config"
 	"github.com/cbellee/ev-solar-charger/internal/controller"
 	"github.com/cbellee/ev-solar-charger/internal/storage"
 )
@@ -66,6 +67,16 @@ func handleState(ctrl *controller.Controller) http.HandlerFunc {
 		snap := ctrl.GetStateSnapshot()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(snap)
+	}
+}
+
+func handleEntraConfig(cfg config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"tenantId": cfg.EntraTenantID,
+			"clientId": cfg.EntraClientID,
+		})
 	}
 }
 

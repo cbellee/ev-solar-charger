@@ -1,13 +1,17 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   AuthenticatedTemplate,
   MsalProvider,
   UnauthenticatedTemplate,
   useMsal,
 } from "@azure/msal-react";
-import { EventType, InteractionStatus } from "@azure/msal-browser";
+import {
+  EventType,
+  InteractionStatus,
+  PublicClientApplication,
+} from "@azure/msal-browser";
 import type { AuthenticationResult, EventMessage } from "@azure/msal-browser";
-import { loginRequest, msalInstance } from "./msalConfig";
+import { createMsalInstance, loginRequest } from "./msalConfig";
 import { setTokenGetter } from "@/api/client";
 import { useIdToken } from "./useIdToken";
 
@@ -33,10 +37,7 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   }, [accounts, instance]);
 
   useEffect(() => {
-    if (
-      accounts.length === 0 &&
-      inProgress === InteractionStatus.None
-    ) {
+    if (accounts.length === 0 && inProgress === InteractionStatus.None) {
       void instance.loginRedirect(loginRequest);
     }
   }, [accounts.length, inProgress, instance]);
@@ -53,27 +54,96 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   );
 }
 
+function AuthConfigError({ message }: { message: string }): JSX.Element {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-950 px-6 text-gray-100">
+      <div className="max-w-xl rounded-2xl border border-red-900/50 bg-red-950/30 p-6 shadow-xl">
+        <h1 className="text-xl font-semibold text-white">Authentication unavailable</h1>
+        <p className="mt-3 text-sm leading-6 text-red-100">{message}</p>
+        <p className="mt-3 text-sm leading-6 text-red-200/90">
+          For embedded deployments, ensure the server is started with
+          ENTRA_TENANT_ID and ENTRA_CLIENT_ID. For local Vite development,
+          set VITE_ENTRA_TENANT_ID and VITE_ENTRA_CLIENT_ID.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // AuthProvider wraps the app in MsalProvider and handles the redirect promise
 // so the active account is set before children render.
 export function AuthProvider({ children }: { children: ReactNode }): JSX.Element {
+  const [msalInstance, setMsalInstance] = useState<PublicClientApplication | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   useEffect(() => {
-    const callbackId = msalInstance.addEventCallback((msg: EventMessage) => {
-      if (msg.eventType === EventType.LOGIN_SUCCESS && msg.payload) {
-        const result = msg.payload as AuthenticationResult;
-        if (result.account) {
-          msalInstance.setActiveAccount(result.account);
+    let disposed = false;
+    let callbackId: string | null = null;
+    let instance: PublicClientApplication | null = null;
+
+    async function initialize() {
+      const resolved = await createMsalInstance();
+      if (disposed) {
+        return;
+      }
+      if (!resolved.instance) {
+        setAuthError(resolved.error ?? "Authentication initialization failed.");
+        return;
+      }
+
+      instance = resolved.instance;
+      callbackId = instance.addEventCallback((msg: EventMessage) => {
+        if (msg.eventType === EventType.LOGIN_SUCCESS && msg.payload) {
+          const result = msg.payload as AuthenticationResult;
+          if (result.account) {
+            instance?.setActiveAccount(result.account);
+          }
+        }
+      });
+
+      try {
+        await instance.initialize();
+        const result = await instance.handleRedirectPromise();
+        if (result?.account) {
+          instance.setActiveAccount(result.account);
+        } else if (!instance.getActiveAccount()) {
+          const [account] = instance.getAllAccounts();
+          if (account) {
+            instance.setActiveAccount(account);
+          }
+        }
+        if (!disposed) {
+          setMsalInstance(instance);
+        }
+      } catch (error) {
+        if (!disposed) {
+          const message = error instanceof Error ? error.message : "Authentication initialization failed.";
+          setAuthError(message);
         }
       }
-    });
+    }
 
-    void msalInstance.initialize().then(() => msalInstance.handleRedirectPromise());
+    void initialize();
 
     return () => {
-      if (callbackId) {
-        msalInstance.removeEventCallback(callbackId);
+      disposed = true;
+      if (callbackId && instance) {
+        instance.removeEventCallback(callbackId);
       }
     };
   }, []);
+
+  if (authError) {
+    return <AuthConfigError message={authError} />;
+  }
+
+  if (!msalInstance) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-950 text-slate-300">
+        Loading authentication...
+      </div>
+    );
+  }
 
   return (
     <MsalProvider instance={msalInstance}>

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,6 +20,8 @@ func oauthTestConfig() config.Config {
 		OAuthStateHMACKey:     "state-signing-key",
 		TeslaRegion:           "na",
 		TeslaTokenPath:        "/tmp/tesla-refresh-token",
+		EntraTenantID:         "tenant-id",
+		EntraClientID:         "entra-client-id",
 	}
 }
 
@@ -91,5 +94,31 @@ func Test_NewServer_allowsPublicKeyEndpointWithoutAuth(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
+func Test_NewServer_allowsEntraConfigWithoutAuth(t *testing.T) {
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig())
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/entra/config", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		TenantID string `json:"tenantId"`
+		ClientID string `json:"clientId"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.TenantID != "tenant-id" {
+		t.Fatalf("TenantID = %q, want %q", resp.TenantID, "tenant-id")
+	}
+	if resp.ClientID != "entra-client-id" {
+		t.Fatalf("ClientID = %q, want %q", resp.ClientID, "entra-client-id")
 	}
 }
