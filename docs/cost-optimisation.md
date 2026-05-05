@@ -35,7 +35,7 @@ The inverter is polled every tick (free, local Modbus call), but Tesla API calls
 | Controller State | Poll Interval | Rationale |
 |------------------|---------------|-----------|
 | First call (no cache) | Immediate | Need initial vehicle state |
-| Charging | `TESLA_CHARGING_POLL_SECONDS` (default 60s) | Track battery % and actual amps; 60s is sufficient for adjustment |
+| Charging | `TESLA_CHARGING_POLL_SECONDS` (default 120s) | Track battery % and actual amps with lower data-call spend |
 | Idle/Monitoring with surplus ≥ min amps | `TESLA_IDLE_POLL_SECONDS` (default 300s) | Check if car is still plugged in before waking |
 | Idle/Monitoring, no surplus | Skipped entirely | No reason to poll — surplus must appear first |
 | Wake Pending | Skipped | Wake command handles its own polling loop |
@@ -46,7 +46,7 @@ Between Tesla API calls, the controller uses `cachedChargeState` so the UI snaps
 
 **Files changed:** `internal/config/config.go`, `internal/controller/controller.go`
 
-When already charging, `SetChargingAmps` is only sent when the change exceeds `AMPS_CHANGE_THRESHOLD` (default 2A). This prevents command oscillation from minor solar fluctuations (e.g. passing clouds) while still reacting to meaningful surplus changes.
+When already charging, `SetChargingAmps` is only sent when the change exceeds `AMPS_CHANGE_THRESHOLD` (default 2A) and the last automatic amp change is older than `AMPS_ADJUST_INTERVAL_SECONDS` (default 60s). This prevents command oscillation from minor solar fluctuations and caps automatic amp-adjust traffic at roughly one command per minute.
 
 Small fluctuations (±1A) are absorbed without any API call. Large ramps (e.g. morning sun rising from 5A to 20A surplus) trigger an immediate adjustment.
 
@@ -54,9 +54,10 @@ Small fluctuations (±1A) are absorbed without any API call. Large ramps (e.g. m
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TESLA_CHARGING_POLL_SECONDS` | 60 | Interval between Tesla API polls while actively charging |
+| `TESLA_CHARGING_POLL_SECONDS` | 120 | Interval between Tesla API polls while actively charging |
 | `TESLA_IDLE_POLL_SECONDS` | 300 | Interval between Tesla API polls when idle but surplus is available |
 | `AMPS_CHANGE_THRESHOLD` | 2 | Minimum amp change required to send a `SetChargingAmps` command |
+| `AMPS_ADJUST_INTERVAL_SECONDS` | 60 | Minimum time between automatic `SetChargingAmps` commands while charging |
 
 All three have validation (≥ 1 for intervals, ≥ 0 for threshold) and are optional with sensible defaults.
 
@@ -66,20 +67,20 @@ Assuming 6 hours charging, 2 hours monitoring, 16 hours idle per day:
 
 | Category | Before (per day) | After (per day) |
 |----------|-------------------|-----------------|
-| Data calls (charging) | 2,160 ($4.32) | 360 ($0.72) |
+| Data calls (charging) | 2,160 ($4.32) | 180 ($0.36) |
 | Data calls (monitoring) | 720 ($1.44) | 24 ($0.05) |
 | Data calls (idle) | 5,760 ($11.52) | 0 ($0.00) |
-| Command calls | ~100 ($0.10) | ~30 ($0.03) |
+| Command calls | ~100 ($0.10) | ~15 ($0.02) |
 | Wake calls | ~2 ($0.04) | ~2 ($0.04) |
-| **Daily total** | **~$17.42** | **~$0.84** |
-| **Monthly total** | **~$523** | **~$25 − $10 discount ≈ $15** |
+| **Daily total** | **~$17.42** | **~$0.47** |
+| **Monthly total** | **~$523** | **~$14 − $10 discount ≈ $4** |
 
-This represents approximately a **95% cost reduction** while maintaining responsive solar-tracking behaviour during active charging.
+This represents approximately a **97% cost reduction** while maintaining responsive solar-tracking behaviour during active charging.
 
 ## Trade-offs
 
 - **Slower reaction when idle:** If surplus appears and the car state has changed (e.g. plugged in while idle), detection is delayed by up to `TESLA_IDLE_POLL_SECONDS`. This is acceptable because surplus must sustain for `WAKE_THRESHOLD_POLLS` ticks before a wake is attempted anyway.
-- **Amps granularity:** The 2A hysteresis means charging may be 1A below optimal at times. The energy difference is negligible (~240W) compared to the API cost savings.
+- **Amps granularity:** The 2A hysteresis and 60s adjustment interval mean charging can lag the instantaneous optimum briefly. The energy difference is negligible compared to the API cost savings.
 - **Cached state staleness:** If the car is unplugged mid-charge, the controller won't detect it until the next poll. The Tesla API will return an error on the next command, triggering an immediate fresh poll via the error path.
 
 ## Tests

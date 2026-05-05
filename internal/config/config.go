@@ -46,6 +46,7 @@ type Config struct {
 	TeslaChargingPollInterval     time.Duration
 	TeslaIdlePollInterval         time.Duration
 	AmpsChangeThreshold           int
+	AmpsAdjustInterval            time.Duration
 	HTTPHost                      string
 	HTTPPort                      int
 	TLSEnabled                    bool
@@ -271,7 +272,7 @@ func Load() (Config, error) {
 	}
 	cfg.CommandFailureBackoff = time.Duration(commandFailureBackoffSec) * time.Second
 
-	teslaChargingSec, err := envInt("TESLA_CHARGING_POLL_SECONDS", 60)
+	teslaChargingSec, err := envInt("TESLA_CHARGING_POLL_SECONDS", 120)
 	if err != nil {
 		return Config{}, err
 	}
@@ -296,6 +297,15 @@ func Load() (Config, error) {
 	if cfg.AmpsChangeThreshold < 0 {
 		return Config{}, fmt.Errorf("config: AMPS_CHANGE_THRESHOLD must be >= 0, got %d", cfg.AmpsChangeThreshold)
 	}
+
+	ampsAdjustIntervalSec, err := envInt("AMPS_ADJUST_INTERVAL_SECONDS", 60)
+	if err != nil {
+		return Config{}, err
+	}
+	if ampsAdjustIntervalSec < 0 {
+		return Config{}, fmt.Errorf("config: AMPS_ADJUST_INTERVAL_SECONDS must be >= 0, got %d", ampsAdjustIntervalSec)
+	}
+	cfg.AmpsAdjustInterval = time.Duration(ampsAdjustIntervalSec) * time.Second
 
 	cfg.HTTPHost = envOrDefault("HTTP_HOST", "127.0.0.1")
 	if strings.TrimSpace(cfg.HTTPHost) == "" {

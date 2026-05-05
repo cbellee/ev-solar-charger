@@ -192,6 +192,7 @@ func defaultCfg() config.Config {
 		TeslaChargingPollInterval: 0, // poll every tick in tests
 		TeslaIdlePollInterval:     0, // poll every tick in tests
 		AmpsChangeThreshold:       0, // no hysteresis in legacy tests
+		AmpsAdjustInterval:        0, // no rate limiting in legacy tests
 	}
 }
 
@@ -888,6 +889,46 @@ func Test_Tick_ampsHysteresisAllowsLargeChange(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected SetChargingAmps:25 for large change, got %v", calls)
+	}
+}
+
+func Test_Tick_ampsAdjustIntervalSkipsRapidRepeat(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.AmpsChangeThreshold = 0
+	cfg.AmpsAdjustInterval = 1 * time.Minute
+	cfg.TeslaChargingPollInterval = 0
+
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 7000, GridWatts: -3600, SurplusWatts: 3600}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Charging", AmpsActual: 10}}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+	ctrl.mu.Lock()
+	ctrl.state = StateCharging
+	ctrl.lastChargeAmps = 10
+	ctrl.lastAmpsAdjustAt = time.Now()
+	ctrl.mu.Unlock()
+
+	ctrl.Tick(context.Background())
+
+	for _, call := range veh.getCalls() {
+		if call == "SetChargingAmps:25" {
+			t.Fatalf("expected SetChargingAmps to be skipped within adjust interval, got %v", veh.getCalls())
+		}
+	}
+
+	ctrl.mu.Lock()
+	ctrl.lastAmpsAdjustAt = time.Now().Add(-2 * time.Minute)
+	ctrl.mu.Unlock()
+
+	ctrl.Tick(context.Background())
+
+	found := false
+	for _, call := range veh.getCalls() {
+		if call == "SetChargingAmps:25" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected SetChargingAmps after adjust interval elapsed, got %v", veh.getCalls())
 	}
 }
 

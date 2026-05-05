@@ -131,14 +131,17 @@ func Test_Load_defaultsApplied(t *testing.T) {
 	if cfg.TeslaTestMode {
 		t.Fatal("TeslaTestMode = true, want false")
 	}
-	if cfg.TeslaChargingPollInterval != 60*time.Second {
-		t.Errorf("TeslaChargingPollInterval = %v, want 60s", cfg.TeslaChargingPollInterval)
+	if cfg.TeslaChargingPollInterval != 120*time.Second {
+		t.Errorf("TeslaChargingPollInterval = %v, want 120s", cfg.TeslaChargingPollInterval)
 	}
 	if cfg.TeslaIdlePollInterval != 300*time.Second {
 		t.Errorf("TeslaIdlePollInterval = %v, want 300s", cfg.TeslaIdlePollInterval)
 	}
 	if cfg.AmpsChangeThreshold != 2 {
 		t.Errorf("AmpsChangeThreshold = %d, want 2", cfg.AmpsChangeThreshold)
+	}
+	if cfg.AmpsAdjustInterval != 60*time.Second {
+		t.Errorf("AmpsAdjustInterval = %v, want 60s", cfg.AmpsAdjustInterval)
 	}
 	if cfg.TLSEnabled {
 		t.Fatal("TLSEnabled = true, want false")
@@ -223,6 +226,29 @@ func Test_Load_missingTeslaRefreshTokenAllowed(t *testing.T) {
 	}
 	if cfg.TeslaRefreshToken != "" {
 		t.Fatalf("TeslaRefreshToken = %q, want empty", cfg.TeslaRefreshToken)
+	}
+}
+
+func Test_Load_ampsAdjustIntervalCustom(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("AMPS_ADJUST_INTERVAL_SECONDS", "90")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AmpsAdjustInterval != 90*time.Second {
+		t.Errorf("AmpsAdjustInterval = %v, want 90s", cfg.AmpsAdjustInterval)
+	}
+}
+
+func Test_Load_ampsAdjustIntervalNegative(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("AMPS_ADJUST_INTERVAL_SECONDS", "-1")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for AMPS_ADJUST_INTERVAL_SECONDS=-1")
 	}
 }
 

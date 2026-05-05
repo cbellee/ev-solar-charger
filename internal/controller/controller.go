@@ -94,6 +94,7 @@ type Controller struct {
 	lastNonActionableAt    time.Time
 	lastChargeStartAttempt time.Time
 	lastCommandFailure     time.Time
+	lastAmpsAdjustAt       time.Time
 	cachedChargeState      tesla.ChargeState
 	hasCachedState         bool
 
@@ -308,6 +309,7 @@ func (c *Controller) Tick(ctx context.Context) {
 					c.recordCommandFailure()
 					c.transitionTo(ctx, StateError, err.Error())
 				} else if err := c.vehicle.StartCharging(ctx); err != nil {
+					c.recordAmpsAdjust()
 					c.logger.WarnContext(ctx, "start charging failed", "error", err)
 					c.recordCommandFailure()
 					c.transitionTo(ctx, StateError, err.Error())
@@ -316,6 +318,7 @@ func (c *Controller) Tick(ctx context.Context) {
 					c.mu.Lock()
 					c.lastChargeAmps = availableAmps
 					c.mu.Unlock()
+					c.recordAmpsAdjust()
 				}
 			}
 		} else {
@@ -333,7 +336,7 @@ func (c *Controller) Tick(ctx context.Context) {
 			// Skip if amps are already at the target (defensive — handles
 			// the threshold=1 case where ampsDiff>=threshold can be true
 			// even though we just sent the same value).
-			if availableAmps != lastAmps && ampsDiff >= threshold {
+			if availableAmps != lastAmps && ampsDiff >= threshold && c.canAdjustChargingAmps() {
 				if err := c.vehicle.SetChargingAmps(ctx, availableAmps); err != nil {
 					c.logger.WarnContext(ctx, "set amps failed", "error", err)
 					c.recordCommandFailure()
@@ -341,6 +344,7 @@ func (c *Controller) Tick(ctx context.Context) {
 					c.mu.Lock()
 					c.lastChargeAmps = availableAmps
 					c.mu.Unlock()
+					c.recordAmpsAdjust()
 					c.logger.InfoContext(ctx, "adjusted amps", "amps", availableAmps)
 				}
 			}
@@ -549,6 +553,24 @@ func (c *Controller) recordChargeStartAttempt() {
 func (c *Controller) recordCommandFailure() {
 	c.mu.Lock()
 	c.lastCommandFailure = time.Now()
+	c.mu.Unlock()
+}
+
+func (c *Controller) canAdjustChargingAmps() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.cfg.AmpsAdjustInterval <= 0 {
+		return true
+	}
+	if c.lastAmpsAdjustAt.IsZero() {
+		return true
+	}
+	return time.Since(c.lastAmpsAdjustAt) >= c.cfg.AmpsAdjustInterval
+}
+
+func (c *Controller) recordAmpsAdjust() {
+	c.mu.Lock()
+	c.lastAmpsAdjustAt = time.Now()
 	c.mu.Unlock()
 }
 
@@ -843,6 +865,7 @@ func (c *Controller) ForceRefresh(ctx context.Context) {
 	c.lastNonActionableAt = time.Time{}
 	c.lastChargeStartAttempt = time.Time{}
 	c.lastCommandFailure = time.Time{}
+	c.lastAmpsAdjustAt = time.Time{}
 	c.consecutiveLow = 0
 	c.consecutiveSurplus = 0
 	if c.state == StateError {
