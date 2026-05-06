@@ -38,3 +38,16 @@ export function formatTime(iso: string): string {
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString();
 }
+
+export function formatDurationHours(hours: number): string {
+  if (!Number.isFinite(hours) || hours <= 0) return "—";
+
+  const totalMinutes = Math.round(hours * 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+
+  const wholeHours = Math.floor(totalMinutes / 60);
+  const remainingMinutes = totalMinutes % 60;
+  if (remainingMinutes === 0) return `${wholeHours}h`;
+
+  return `${wholeHours}h ${remainingMinutes}m`;
+}

@@ -222,12 +222,15 @@ func Test_Tick_idleCarNotPluggedHighSurplus(t *testing.T) {
 
 func Test_Tick_idleCarPluggedHighSurplus(t *testing.T) {
 	inv := &mockInverter{power: inverter.PowerData{PVWatts: 6000, GridWatts: -2400, SurplusWatts: 2400}}
-	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped", TimeToLimitHours: 2.5}}
 	ctrl := newTestController(inv, veh, &mockStore{})
 	ctrl.Tick(context.Background())
 	snap := ctrl.GetStateSnapshot()
 	if snap.State != StateCharging {
 		t.Errorf("State = %q, want %q", snap.State, StateCharging)
+	}
+	if snap.TimeToLimitHours != 2.5 {
+		t.Errorf("TimeToLimitHours = %f, want 2.5", snap.TimeToLimitHours)
 	}
 	calls := veh.getCalls()
 	if len(calls) < 2 {

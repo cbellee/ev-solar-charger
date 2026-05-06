@@ -30,6 +30,7 @@ export interface StateSnapshot {
   targetAmps: number;
   actualAmps: number;
   batteryPct: number;
+  timeToLimitHours: number;
   chargeLimit: number;
   chargeLimitMin: number;
   chargeLimitMax: number;

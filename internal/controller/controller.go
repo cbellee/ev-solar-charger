@@ -50,6 +50,7 @@ type StateSnapshot struct {
 	TargetAmps         int       `json:"targetAmps"`
 	ActualAmps         int       `json:"actualAmps"`
 	BatteryPct         float64   `json:"batteryPct"`
+	TimeToLimitHours   float64   `json:"timeToLimitHours"`
 	ChargeLimit        int       `json:"chargeLimit"`
 	ChargeLimitMin     int       `json:"chargeLimitMin"`
 	ChargeLimitMax     int       `json:"chargeLimitMax"`
@@ -747,6 +748,7 @@ func (c *Controller) updateSnapshot(power inverter.PowerData, cs tesla.ChargeSta
 		TargetAmps:         targetAmps,
 		ActualAmps:         cs.AmpsActual,
 		BatteryPct:         cs.BatteryPct,
+		TimeToLimitHours:   cs.TimeToLimitHours,
 		ChargeLimit:        cs.ChargeLimit,
 		ChargeLimitMin:     cs.ChargeLimitMin,
 		ChargeLimitMax:     cs.ChargeLimitMax,

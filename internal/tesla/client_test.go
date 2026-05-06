@@ -142,6 +142,7 @@ func Test_GetChargeState_charging(t *testing.T) {
 					"charging_state":         "Charging",
 					"charger_actual_current": 16,
 					"battery_level":          55.0,
+					"time_to_full_charge":    1.5,
 					"charge_port_latch":      "Engaged",
 				},
 				"state": "online",
@@ -161,6 +162,9 @@ func Test_GetChargeState_charging(t *testing.T) {
 	}
 	if cs.BatteryPct != 55.0 {
 		t.Errorf("BatteryPct = %f, want 55.0", cs.BatteryPct)
+	}
+	if cs.TimeToLimitHours != 1.5 {
+		t.Errorf("TimeToLimitHours = %f, want 1.5", cs.TimeToLimitHours)
 	}
 	if !cs.PluggedIn {
 		t.Error("PluggedIn should be true")

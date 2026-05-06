@@ -298,6 +298,7 @@ func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
 				ChargingState      string  `json:"charging_state"`
 				ChargeAmps         int     `json:"charger_actual_current"`
 				BatteryLevel       float64 `json:"battery_level"`
+				TimeToFullCharge   float64 `json:"time_to_full_charge"`
 				ChargePortDoorOpen bool    `json:"charge_port_door_open"`
 				ChargePortLatch    string  `json:"charge_port_latch"`
 				ChargeLimitSOC     int     `json:"charge_limit_soc"`
@@ -319,14 +320,15 @@ func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
 	chargingState := result.Response.ChargeState.ChargingState
 	latchEngaged := result.Response.ChargeState.ChargePortLatch == "Engaged"
 	cs := ChargeState{
-		State:          chargingState,
-		AmpsActual:     result.Response.ChargeState.ChargeAmps,
-		BatteryPct:     result.Response.ChargeState.BatteryLevel,
-		PluggedIn:      latchEngaged && chargingState != "Disconnected",
-		IsOnline:       result.Response.State == "online",
-		ChargeLimit:    result.Response.ChargeState.ChargeLimitSOC,
-		ChargeLimitMin: result.Response.ChargeState.ChargeLimitSOCMin,
-		ChargeLimitMax: result.Response.ChargeState.ChargeLimitSOCMax,
+		State:            chargingState,
+		AmpsActual:       result.Response.ChargeState.ChargeAmps,
+		BatteryPct:       result.Response.ChargeState.BatteryLevel,
+		TimeToLimitHours: result.Response.ChargeState.TimeToFullCharge,
+		PluggedIn:        latchEngaged && chargingState != "Disconnected",
+		IsOnline:         result.Response.State == "online",
+		ChargeLimit:      result.Response.ChargeState.ChargeLimitSOC,
+		ChargeLimitMin:   result.Response.ChargeState.ChargeLimitSOCMin,
+		ChargeLimitMax:   result.Response.ChargeState.ChargeLimitSOCMax,
 	}
 
 	if c.metrics != nil {
