@@ -89,6 +89,8 @@ export default function UsagePage() {
         <div className="flex flex-wrap items-end gap-3 mb-4">
           <Field label="Range">
             <select
+              aria-label="Range"
+              title="Range"
               value={range}
               onChange={(e) => setRange(e.target.value as Range)}
               className={inputCls}

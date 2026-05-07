@@ -45,20 +45,20 @@ export default function HistoryPage() {
       <Card title="History">
         <div className="flex flex-wrap items-end gap-3 mb-4">
           <Field label="From">
-            <input type="datetime-local" value={toLocalInput(from)} onChange={(e) => setFrom(fromLocalInput(e.target.value))} className={inputCls} />
+            <input type="datetime-local" aria-label="From" title="From" value={toLocalInput(from)} onChange={(e) => setFrom(fromLocalInput(e.target.value))} className={inputCls} />
           </Field>
           <Field label="To">
-            <input type="datetime-local" value={toLocalInput(to)} onChange={(e) => setTo(fromLocalInput(e.target.value))} className={inputCls} />
+            <input type="datetime-local" aria-label="To" title="To" value={toLocalInput(to)} onChange={(e) => setTo(fromLocalInput(e.target.value))} className={inputCls} />
           </Field>
           <Field label="Interval">
-            <select value={interval} onChange={(e) => setInterval(e.target.value as HistoryInterval)} className={inputCls}>
+            <select aria-label="Interval" title="Interval" value={interval} onChange={(e) => setInterval(e.target.value as HistoryInterval)} className={inputCls}>
               <option value="minute">minute</option>
               <option value="hour">hour</option>
               <option value="day">day</option>
             </select>
           </Field>
           <Field label="Limit">
-            <input type="number" min={1} max={1000} value={limit} onChange={(e) => setLimit(Number(e.target.value))} className={inputCls} />
+            <input type="number" aria-label="Limit" title="Limit" min={1} max={1000} value={limit} onChange={(e) => setLimit(Number(e.target.value))} className={inputCls} />
           </Field>
           <button type="button" onClick={() => refetch()} className="rounded bg-blue-600 hover:bg-blue-500 px-3 py-1.5 text-sm font-medium">
             Refresh
