@@ -22,6 +22,7 @@ import (
 
 	"github.com/cbellee/ev-solar-charger/internal/config"
 	"github.com/cbellee/ev-solar-charger/internal/controller"
+	"github.com/cbellee/ev-solar-charger/internal/fleettelemetry"
 	"github.com/cbellee/ev-solar-charger/internal/inverter"
 	"github.com/cbellee/ev-solar-charger/internal/observability"
 	"github.com/cbellee/ev-solar-charger/internal/storage"
@@ -268,6 +269,16 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	// 9. Create SSE hub and wire up controller notifications.
 	hub := deps.newHub(logger)
 	ctrl.OnUpdate = hub.Broadcast
+
+	// 9b. Start the optional Fleet Telemetry MQTT bridge. This keeps the app on
+	// the existing Tesla control path while allowing a Fleet Telemetry MQTT
+	// backend to refresh the controller cache and suppress paid vehicle_data
+	// polling when stream data is fresh.
+	if !cfg.TeslaTestMode {
+		if err := fleettelemetry.StartMQTTBridge(ctx, ctrl, logger, cfg); err != nil {
+			return fmt.Errorf("failed to start fleet telemetry mqtt bridge: %w", err)
+		}
+	}
 
 	// 10. Create Entra ID authenticator (validates ID tokens on /api/* and /events).
 	authCtx, authCancel := context.WithTimeout(ctx, web.HealthCheckTimeout)

@@ -20,10 +20,16 @@ type Config struct {
 	TeslaRedirectURI              string
 	TeslaScope                    string
 	TeslaVIN                      string
+	FleetTelemetryMQTTBroker      string
+	FleetTelemetryMQTTTopicBase   string
+	FleetTelemetryMQTTClientID    string
+	FleetTelemetryMQTTUsername    string
+	FleetTelemetryMQTTPassword    string
 	TeslaPrivateKeyPath           string
 	TeslaPublicKeyPEMPath         string
 	OAuthStateHMACKey             string
 	TeslaTokenPath                string
+	FleetTelemetrySharedSecret    string
 	TeslaRegion                   string
 	TeslaCommandBase              string
 	TeslaProxyCAFile              string
@@ -45,6 +51,7 @@ type Config struct {
 	CommandFailureBackoff         time.Duration
 	TeslaChargingPollInterval     time.Duration
 	TeslaIdlePollInterval         time.Duration
+	FleetTelemetryStaleAfter      time.Duration
 	AmpsChangeThreshold           int
 	AmpsAdjustInterval            time.Duration
 	HTTPHost                      string
@@ -86,10 +93,16 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.FleetTelemetryMQTTBroker = envOrDefault("FLEET_TELEMETRY_MQTT_BROKER", "")
+	cfg.FleetTelemetryMQTTTopicBase = envOrDefault("FLEET_TELEMETRY_MQTT_TOPIC_BASE", "telemetry")
+	cfg.FleetTelemetryMQTTClientID = envOrDefault("FLEET_TELEMETRY_MQTT_CLIENT_ID", "")
+	cfg.FleetTelemetryMQTTUsername = envOrDefault("FLEET_TELEMETRY_MQTT_USERNAME", "")
+	cfg.FleetTelemetryMQTTPassword = envOrDefault("FLEET_TELEMETRY_MQTT_PASSWORD", "")
 	cfg.TeslaPrivateKeyPath = envOrDefault("TESLA_PRIVATE_KEY_PATH", "/secrets/fleet-key.pem")
 	cfg.TeslaPublicKeyPEMPath = envOrDefault("TESLA_PUBLIC_KEY_PEM_PATH", "/secrets/com.tesla.3p.public-key.pem")
 	cfg.OAuthStateHMACKey = envOrDefault("OAUTH_STATE_HMAC_KEY", "")
 	cfg.TeslaTokenPath = envOrDefault("TESLA_TOKEN_PATH", "/data/tesla-refresh-token")
+	cfg.FleetTelemetrySharedSecret = envOrDefault("FLEET_TELEMETRY_SHARED_SECRET", "")
 	cfg.TeslaRegion = envOrDefault("TESLA_REGION", "na")
 	cfg.TeslaCommandBase = envOrDefault("TESLA_COMMAND_BASE", "")
 	cfg.TeslaProxyCAFile = envOrDefault("TESLA_PROXY_CA_FILE", "")
@@ -112,6 +125,9 @@ func Load() (Config, error) {
 
 	if strings.TrimSpace(cfg.TeslaRedirectURI) == "" {
 		return Config{}, fmt.Errorf("config: TESLA_REDIRECT_URI is required")
+	}
+	if cfg.FleetTelemetryMQTTBroker != "" && strings.TrimSpace(cfg.FleetTelemetryMQTTTopicBase) == "" {
+		return Config{}, fmt.Errorf("config: FLEET_TELEMETRY_MQTT_TOPIC_BASE must not be empty when FLEET_TELEMETRY_MQTT_BROKER is set")
 	}
 
 	redirectURL, err := url.Parse(cfg.TeslaRedirectURI)
@@ -289,6 +305,15 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: TESLA_IDLE_POLL_SECONDS must be >= 1, got %d", teslaIdleSec)
 	}
 	cfg.TeslaIdlePollInterval = time.Duration(teslaIdleSec) * time.Second
+
+	telemetryStaleSec, err := envInt("FLEET_TELEMETRY_STALE_AFTER_SECONDS", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	if telemetryStaleSec < 0 {
+		return Config{}, fmt.Errorf("config: FLEET_TELEMETRY_STALE_AFTER_SECONDS must be >= 0, got %d", telemetryStaleSec)
+	}
+	cfg.FleetTelemetryStaleAfter = time.Duration(telemetryStaleSec) * time.Second
 
 	cfg.AmpsChangeThreshold, err = envInt("AMPS_CHANGE_THRESHOLD", 2)
 	if err != nil {

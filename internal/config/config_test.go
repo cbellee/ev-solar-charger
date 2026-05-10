@@ -137,6 +137,18 @@ func Test_Load_defaultsApplied(t *testing.T) {
 	if cfg.TeslaIdlePollInterval != 1800*time.Second {
 		t.Errorf("TeslaIdlePollInterval = %v, want 1800s", cfg.TeslaIdlePollInterval)
 	}
+	if cfg.FleetTelemetryStaleAfter != 0 {
+		t.Errorf("FleetTelemetryStaleAfter = %v, want 0", cfg.FleetTelemetryStaleAfter)
+	}
+	if cfg.FleetTelemetrySharedSecret != "" {
+		t.Errorf("FleetTelemetrySharedSecret = %q, want empty", cfg.FleetTelemetrySharedSecret)
+	}
+	if cfg.FleetTelemetryMQTTBroker != "" {
+		t.Errorf("FleetTelemetryMQTTBroker = %q, want empty", cfg.FleetTelemetryMQTTBroker)
+	}
+	if cfg.FleetTelemetryMQTTTopicBase != "telemetry" {
+		t.Errorf("FleetTelemetryMQTTTopicBase = %q, want %q", cfg.FleetTelemetryMQTTTopicBase, "telemetry")
+	}
 	if cfg.AmpsChangeThreshold != 2 {
 		t.Errorf("AmpsChangeThreshold = %d, want 2", cfg.AmpsChangeThreshold)
 	}
@@ -356,6 +368,77 @@ func Test_Load_teslaIdlePollSecondsCustom(t *testing.T) {
 	}
 	if cfg.TeslaIdlePollInterval != 120*time.Second {
 		t.Errorf("TeslaIdlePollInterval = %v, want 120s", cfg.TeslaIdlePollInterval)
+	}
+}
+
+func Test_Load_fleetTelemetryStaleAfterCustom(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FLEET_TELEMETRY_STALE_AFTER_SECONDS", "180")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FleetTelemetryStaleAfter != 180*time.Second {
+		t.Errorf("FleetTelemetryStaleAfter = %v, want 180s", cfg.FleetTelemetryStaleAfter)
+	}
+}
+
+func Test_Load_fleetTelemetryStaleAfterNegative(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FLEET_TELEMETRY_STALE_AFTER_SECONDS", "-1")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for FLEET_TELEMETRY_STALE_AFTER_SECONDS=-1")
+	}
+}
+
+func Test_Load_fleetTelemetrySharedSecretCustom(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FLEET_TELEMETRY_SHARED_SECRET", "top-secret")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FleetTelemetrySharedSecret != "top-secret" {
+		t.Errorf("FleetTelemetrySharedSecret = %q, want %q", cfg.FleetTelemetrySharedSecret, "top-secret")
+	}
+}
+
+func Test_Load_fleetTelemetryMQTTConfigCustom(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FLEET_TELEMETRY_MQTT_BROKER", "mqtt://broker:1883")
+	t.Setenv("FLEET_TELEMETRY_MQTT_TOPIC_BASE", "tesla")
+	t.Setenv("FLEET_TELEMETRY_MQTT_CLIENT_ID", "charger-bridge")
+	t.Setenv("FLEET_TELEMETRY_MQTT_USERNAME", "user")
+	t.Setenv("FLEET_TELEMETRY_MQTT_PASSWORD", "pass")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FleetTelemetryMQTTBroker != "mqtt://broker:1883" {
+		t.Errorf("FleetTelemetryMQTTBroker = %q, want mqtt://broker:1883", cfg.FleetTelemetryMQTTBroker)
+	}
+	if cfg.FleetTelemetryMQTTTopicBase != "tesla" {
+		t.Errorf("FleetTelemetryMQTTTopicBase = %q, want tesla", cfg.FleetTelemetryMQTTTopicBase)
+	}
+	if cfg.FleetTelemetryMQTTClientID != "charger-bridge" {
+		t.Errorf("FleetTelemetryMQTTClientID = %q, want charger-bridge", cfg.FleetTelemetryMQTTClientID)
+	}
+	if cfg.FleetTelemetryMQTTUsername != "user" {
+		t.Errorf("FleetTelemetryMQTTUsername = %q, want user", cfg.FleetTelemetryMQTTUsername)
+	}
+	if cfg.FleetTelemetryMQTTPassword != "pass" {
+		t.Errorf("FleetTelemetryMQTTPassword = %q, want pass", cfg.FleetTelemetryMQTTPassword)
+	}
+}
+
+func Test_Load_fleetTelemetryMQTTTopicBaseRequiredWhenBrokerSet(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FLEET_TELEMETRY_MQTT_BROKER", "mqtt://broker:1883")
+	t.Setenv("FLEET_TELEMETRY_MQTT_TOPIC_BASE", "   ")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when FLEET_TELEMETRY_MQTT_BROKER is set without FLEET_TELEMETRY_MQTT_TOPIC_BASE")
 	}
 }
 

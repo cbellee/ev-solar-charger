@@ -11,6 +11,36 @@ services:
       - ./secrets:/secrets:ro
     restart: unless-stopped
 
+  mosquitto:
+    profiles: ["fleet-telemetry"]
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./deploy/fleet-telemetry/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    restart: unless-stopped
+
+  fleet-telemetry:
+    profiles: ["fleet-telemetry"]
+    image: tesla/fleet-telemetry:latest
+    command:
+      - /fleet-telemetry
+      - -config=/etc/tesla/config.json
+    ports:
+      - "4443:4443"
+      - "18080:8080"
+      - "19090:9090"
+    environment:
+      SUPPRESS_TLS_HANDSHAKE_ERROR_LOGGING: "true"
+    volumes:
+      - ./deploy/fleet-telemetry/config.json:/etc/tesla/config.json:ro
+      - ./secrets/fleet-telemetry:/etc/tesla/certs/server:ro
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+
   solar-ev-charger:
     build: .
     ports:
@@ -39,3 +69,5 @@ services:
 
 volumes:
   solar-data:
+  mosquitto-data:
+  mosquitto-log:

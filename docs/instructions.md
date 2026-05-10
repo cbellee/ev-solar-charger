@@ -587,11 +587,12 @@ Calls the Tesla Fleet API `vehicle_data` endpoint to get:
 | Controller State | Poll Interval | Rationale |
 |---|---|---|
 | No cached state | Immediate | Need initial vehicle state |
+| Fresh Fleet Telemetry | `FLEET_TELEMETRY_STALE_AFTER_SECONDS` | Use cached stream data and skip paid polling while telemetry stays fresh |
 | Charging | `TESLA_CHARGING_POLL_SECONDS` (default 300s) | Track battery % and actual amps at a lower data-call rate |
 | Idle / monitoring | `TESLA_IDLE_POLL_SECONDS` (default 1800s) | Detect out-of-band charge starts or plug-state changes without frequent polling |
 | Wake pending | `WAKE_RETRY_INTERVAL_SECONDS` (default 300s) | Re-check periodically if the car still has not come online after a wake |
 
-Between API calls, the controller uses a cached charge state so the UI snapshot and state machine continue updating from inverter data.
+Between API calls, the controller uses a cached charge state so the UI snapshot and state machine continue updating from inverter data. If Fleet Telemetry updates are flowing into either the bridge endpoint or the in-process MQTT bridge, the controller treats them as the freshest cache source and suppresses `vehicle_data` reads until that stream cache goes stale.
 
 When `TESLA_TEST_MODE=true`, the controller skips Tesla connectivity entirely and uses inverter surplus only. The dashboard remains live, `targetAmps` becomes a projected value, and all Tesla command actions are disabled.
 
@@ -695,6 +696,7 @@ All `/api/*` and `/events` routes require a valid Microsoft Entra ID ID token wh
 | `GET` | `/api/search` | Entra ID | Full-text search (`q`, `from`, `to`, `limit`) |
 | `GET` | `/api/usage` | Entra ID | Current month's Tesla API usage counters and cost (JSON) |
 | `GET` | `/api/usage/history` | Entra ID | Historical API usage snapshots (`from`, `to`, `limit`) |
+| `POST` | `/telemetry/tesla/charge-state` | Shared secret | Public Fleet Telemetry bridge endpoint for normalized charge-state updates |
 | `GET` | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Public | Tesla public key endpoint for app/domain verification |
 | `GET` | `/auth/tesla` | Entra ID | Starts Tesla OAuth2 authorization code flow |
 | `GET` | `/auth/tesla/callback` | Public | OAuth2 callback endpoint for code exchange |
@@ -722,6 +724,12 @@ All configuration is via environment variables:
 | `TESLA_SCOPE` | No | `openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds` | OAuth scopes requested at `/auth/tesla` |
 | `OAUTH_STATE_HMAC_KEY` | Yes | — | HMAC key used to sign Tesla OAuth state cookie |
 | `TESLA_TOKEN_PATH` | No | `/data/tesla-refresh-token` | File path for persisted Tesla refresh token |
+| `FLEET_TELEMETRY_SHARED_SECRET` | No | — | Shared secret required by `POST /telemetry/tesla/charge-state`; when empty the bridge endpoint is disabled |
+| `FLEET_TELEMETRY_MQTT_BROKER` | No | — | MQTT broker URL for direct Fleet Telemetry subscription, e.g. `tcp://mosquitto:1883` |
+| `FLEET_TELEMETRY_MQTT_TOPIC_BASE` | No | `telemetry` | MQTT topic base published by the Fleet Telemetry server |
+| `FLEET_TELEMETRY_MQTT_CLIENT_ID` | No | `solar-ev-charger-<vin-suffix>` | MQTT client ID used by the in-process Fleet Telemetry subscriber |
+| `FLEET_TELEMETRY_MQTT_USERNAME` | No | — | Optional MQTT username |
+| `FLEET_TELEMETRY_MQTT_PASSWORD` | No | — | Optional MQTT password |
 | `TESLA_COMMAND_BASE` | When using the proxy | — | Base URL of the `tesla-http-proxy` sidecar (typically `https://tesla-http-proxy:4443`) |
 | `TESLA_PROXY_CA_FILE` | When using the proxy | — | Path to the proxy's self-signed TLS cert, e.g. `/secrets/proxy-tls-cert.pem` |
 | `ENTRA_TENANT_ID` | Yes | — | Microsoft Entra tenant GUID |
@@ -739,6 +747,7 @@ All configuration is via environment variables:
 | `WAKE_AFTER_NON_ACTIONABLE_BACKOFF_SECONDS` | No | `1800` | Suppress wakes for this many seconds after observing the car in a non-actionable state (Disconnected, Complete) |
 | `TESLA_CHARGING_POLL_SECONDS` | No | `300` | Seconds between Tesla API polls while charging |
 | `TESLA_IDLE_POLL_SECONDS` | No | `1800` | Seconds between Tesla API polls while idle or monitoring |
+| `FLEET_TELEMETRY_STALE_AFTER_SECONDS` | No | `0` | Seconds to trust the Fleet Telemetry cache before resuming `vehicle_data` polling; `0` disables telemetry-based poll suppression |
 | `AMPS_CHANGE_THRESHOLD` | No | `2` | Minimum amp change to send a `SetChargingAmps` command |
 | `AMPS_ADJUST_INTERVAL_SECONDS` | No | `60` | Minimum time between automatic `SetChargingAmps` commands while charging |
 | `HTTP_HOST` | No | `0.0.0.0` | Bind address for the HTTP listener |

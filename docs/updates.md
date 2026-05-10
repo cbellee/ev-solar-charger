@@ -135,6 +135,41 @@ See `cost-optimisation.md` for full cost analysis and trade-offs.
 
 ## 7. Tesla API Usage Tracking (In-Memory)
 
+## 8. Fleet Telemetry Bridge Ingest (In Progress)
+
+**Files changed:** `internal/controller/controller.go`, `internal/web/server.go`, `internal/web/telemetry.go`, `internal/config/config.go`, `internal/fleettelemetry/mqtt.go`, `cmd/server/main.go`
+
+The application can now accept normalized Fleet Telemetry charge-state updates through a small public bridge endpoint:
+
+- `POST /telemetry/tesla/charge-state`
+- authenticated with `FLEET_TELEMETRY_SHARED_SECRET`
+- merges partial updates into the controller's cached Tesla state
+- suppresses paid `vehicle_data` polling while telemetry remains fresh for `FLEET_TELEMETRY_STALE_AFTER_SECONDS`
+
+The application can also subscribe directly to the Tesla Fleet Telemetry MQTT backend:
+
+- enabled by `FLEET_TELEMETRY_MQTT_BROKER`
+- subscribes to `<topic_base>/<vin>/connectivity` and `<topic_base>/<vin>/v/+`
+- maps the charging subset into the controller cache without an extra sidecar bridge process
+
+This is still an app-side migration step rather than the full Fleet Telemetry deployment. The remaining work is to run the Tesla Fleet Telemetry reference server and broker in deployment, wire them into compose/runtime, and validate the end-to-end stream against real vehicle charging sessions.
+
+## 9. Fleet Telemetry Compose Runtime
+
+**Files changed:** `docker-compose.yml`, `deploy/fleet-telemetry/config.json`, `deploy/fleet-telemetry/mosquitto.conf`, `deploy/fleet-telemetry/README.md`
+
+The repo now includes an optional Docker Compose profile for the Tesla Fleet Telemetry runtime:
+
+- `mosquitto` as the MQTT backend
+- `tesla/fleet-telemetry` as the telemetry server
+- fixed config and broker files mounted from `deploy/fleet-telemetry/`
+
+This keeps the current stack unchanged by default and lets operators opt into telemetry with:
+
+- `docker compose --profile fleet-telemetry up -d`
+
+The remaining work after this is live certificate provisioning, Tesla-side telemetry configuration, and end-to-end validation against a real vehicle charging session.
+
 **Files changed:** `internal/tesla/tesla.go`, `internal/tesla/client.go`, `internal/tesla/testmode.go`, `internal/tesla/client_test.go`
 
 Added real-time tracking of Tesla Fleet API call counts per billing month:

@@ -91,6 +91,7 @@ type Controller struct {
 	sessionSamples  int
 
 	lastTeslaPoll          time.Time
+	lastTelemetryUpdate    time.Time
 	lastWakeAttempt        time.Time
 	lastNonActionableAt    time.Time
 	lastChargeStartAttempt time.Time
@@ -491,24 +492,38 @@ func (c *Controller) transitionTo(ctx context.Context, newState State, reason st
 }
 
 func (c *Controller) updateKnownPlugState(cs tesla.ChargeState) {
+	c.updateKnownPlugStateAt(cs, time.Now())
+}
+
+func (c *Controller) updateKnownPlugStateAt(cs tesla.ChargeState, observedAt time.Time) {
 	if !cs.IsOnline {
 		return
 	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	c.mu.Lock()
 	c.lastKnownPluggedIn = cs.PluggedIn
-	c.lastOnlineAt = time.Now()
+	c.lastOnlineAt = observedAt
 	// Track when we last confirmed the car is in a state from which we
 	// cannot start charging (cable removed, battery full). This is used to
 	// suppress wake commands until either the user changes plug state or a
 	// timeout elapses, since waking again won't help — only physical
 	// action by the user can resolve it.
 	if !cs.PluggedIn || cs.State == "Disconnected" || cs.State == "Complete" {
-		c.lastNonActionableAt = time.Now()
+		c.lastNonActionableAt = observedAt
 	} else {
 		// Plugged in and in an actionable state; clear the suppression.
 		c.lastNonActionableAt = time.Time{}
 	}
 	c.mu.Unlock()
+}
+
+func telemetryFresh(lastTelemetryUpdate, now time.Time, staleAfter time.Duration) bool {
+	if staleAfter <= 0 || lastTelemetryUpdate.IsZero() {
+		return false
+	}
+	return now.Sub(lastTelemetryUpdate) < staleAfter
 }
 
 // isActionableNonChargingState reports whether a non-Charging Tesla
@@ -642,6 +657,7 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 	c.mu.RLock()
 	state := c.state
 	lastPoll := c.lastTeslaPoll
+	lastTelemetry := c.lastTelemetryUpdate
 	hasCache := c.hasCachedState
 	c.mu.RUnlock()
 
@@ -650,6 +666,10 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 	}
 
 	now := time.Now()
+	if telemetryFresh(lastTelemetry, now, c.cfg.FleetTelemetryStaleAfter) {
+		return false
+	}
+
 	switch state {
 	case StateCharging:
 		return now.Sub(lastPoll) >= c.cfg.TeslaChargingPollInterval
@@ -679,6 +699,11 @@ func (c *Controller) getCachedChargeState() tesla.ChargeState {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.cachedChargeState
+}
+
+// GetCachedChargeState returns the controller's latest cached Tesla state.
+func (c *Controller) GetCachedChargeState() tesla.ChargeState {
+	return c.getCachedChargeState()
 }
 
 func (c *Controller) setCachedChargeState(cs tesla.ChargeState) {
@@ -863,6 +888,7 @@ func (c *Controller) ForceRefresh(ctx context.Context) {
 	c.hasCachedState = false
 	c.cachedChargeState = tesla.ChargeState{}
 	c.lastTeslaPoll = time.Time{}
+	c.lastTelemetryUpdate = time.Time{}
 	c.lastWakeAttempt = time.Time{}
 	c.lastNonActionableAt = time.Time{}
 	c.lastChargeStartAttempt = time.Time{}
@@ -877,6 +903,27 @@ func (c *Controller) ForceRefresh(ctx context.Context) {
 	c.mu.Unlock()
 	c.logger.InfoContext(ctx, "force refresh requested")
 	c.Tick(ctx)
+}
+
+// UpdateTelemetryChargeState seeds the controller cache from Fleet Telemetry.
+// While the telemetry state is considered fresh, the controller can skip a paid
+// vehicle_data poll and continue operating from cached stream data.
+func (c *Controller) UpdateTelemetryChargeState(cs tesla.ChargeState, observedAt time.Time) {
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+
+	c.mu.Lock()
+	if !c.lastTelemetryUpdate.IsZero() && observedAt.Before(c.lastTelemetryUpdate) {
+		c.mu.Unlock()
+		return
+	}
+	c.cachedChargeState = cs
+	c.hasCachedState = true
+	c.lastTelemetryUpdate = observedAt
+	c.mu.Unlock()
+
+	c.updateKnownPlugStateAt(cs, observedAt)
 }
 
 // ManualSetAmps sets charging amps (manual mode only).

@@ -34,6 +34,7 @@ type mockVehicle struct {
 	mu          sync.Mutex
 	chargeState tesla.ChargeState
 	stateErr    error
+	stateCalls  int
 	calls       []string
 	setAmpsErr  error
 	setLimitErr error
@@ -45,6 +46,7 @@ type mockVehicle struct {
 func (m *mockVehicle) GetChargeState(ctx context.Context) (tesla.ChargeState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stateCalls++
 	return m.chargeState, m.stateErr
 }
 
@@ -97,6 +99,12 @@ func (m *mockVehicle) getCalls() []string {
 	result := make([]string, len(m.calls))
 	copy(result, m.calls)
 	return result
+}
+
+func (m *mockVehicle) getStateCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stateCalls
 }
 
 // mockStore implements storage.Store (minimal, for controller tests).
@@ -191,6 +199,7 @@ func defaultCfg() config.Config {
 		CommandFailureBackoff:     0, // no cooldown by default in legacy tests
 		TeslaChargingPollInterval: 0, // poll every tick in tests
 		TeslaIdlePollInterval:     0, // poll every tick in tests
+		FleetTelemetryStaleAfter:  0, // disabled by default in tests
 		AmpsChangeThreshold:       0, // no hysteresis in legacy tests
 		AmpsAdjustInterval:        0, // no rate limiting in legacy tests
 	}
@@ -805,6 +814,54 @@ func Test_shouldPollTesla_wakePendingThrottle(t *testing.T) {
 	ctrl.mu.Unlock()
 	if !ctrl.shouldPollTesla(5000) {
 		t.Error("shouldPollTesla = false in wake_pending after retry interval, want true")
+	}
+}
+
+func Test_shouldPollTesla_skipsWhileTelemetryFresh(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.TeslaChargingPollInterval = 60 * time.Second
+	cfg.FleetTelemetryStaleAfter = 2 * time.Minute
+	ctrl := newTestControllerWithConfig(&mockInverter{}, &mockVehicle{}, &mockStore{}, cfg)
+	ctrl.mu.Lock()
+	ctrl.state = StateCharging
+	ctrl.hasCachedState = true
+	ctrl.lastTeslaPoll = time.Now().Add(-10 * time.Minute)
+	ctrl.lastTelemetryUpdate = time.Now()
+	ctrl.mu.Unlock()
+
+	if ctrl.shouldPollTesla(5000) {
+		t.Error("shouldPollTesla = true with fresh telemetry, want false")
+	}
+}
+
+func Test_Tick_usesTelemetryCacheWhenFresh(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.TeslaChargingPollInterval = 60 * time.Second
+	cfg.FleetTelemetryStaleAfter = 5 * time.Minute
+
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 1000, GridWatts: 500, SurplusWatts: 0}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: false, PluggedIn: false, State: "Disconnected"}}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+	ctrl.UpdateTelemetryChargeState(tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped", BatteryPct: 61}, time.Now())
+
+	ctrl.Tick(context.Background())
+
+	if got := veh.getStateCalls(); got != 0 {
+		t.Fatalf("GetChargeState calls = %d, want 0 while telemetry is fresh", got)
+	}
+
+	snap := ctrl.GetStateSnapshot()
+	if !snap.CarOnline {
+		t.Fatal("CarOnline = false, want true from telemetry cache")
+	}
+	if !snap.CarPluggedIn {
+		t.Fatal("CarPluggedIn = false, want true from telemetry cache")
+	}
+	if snap.ChargingState != "Stopped" {
+		t.Fatalf("ChargingState = %q, want %q", snap.ChargingState, "Stopped")
+	}
+	if snap.BatteryPct != 61 {
+		t.Fatalf("BatteryPct = %v, want 61", snap.BatteryPct)
 	}
 }
 

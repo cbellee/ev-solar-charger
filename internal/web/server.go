@@ -36,6 +36,7 @@ func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logge
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", handleHealthz)
+	rootMux.HandleFunc("POST /telemetry/tesla/charge-state", handleFleetTelemetryChargeState(ctrl, cfg))
 
 	// OAuth routes are always registered so the refresh token can be
 	// bootstrapped via /auth/tesla even when TESLA_TEST_MODE=true.
