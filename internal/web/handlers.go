@@ -328,18 +328,20 @@ const (
 )
 
 type apiUsageResponse struct {
-	DataCalls       int64   `json:"dataCalls"`
-	DataCost        float64 `json:"dataCost"`
-	CommandCalls    int64   `json:"commandCalls"`
-	CommandCost     float64 `json:"commandCost"`
-	WakeCalls       int64   `json:"wakeCalls"`
-	WakeCost        float64 `json:"wakeCost"`
-	StreamSignals   int64   `json:"streamSignals"`
-	StreamCost      float64 `json:"streamCost"`
-	EstimatedCost   float64 `json:"estimatedCost"`
-	MonthlyDiscount float64 `json:"monthlyDiscount"`
-	NetCost         float64 `json:"netCost"`
-	MonthStarted    string  `json:"monthStarted"`
+	DataCalls               int64   `json:"dataCalls"`
+	DataCost                float64 `json:"dataCost"`
+	CommandCalls            int64   `json:"commandCalls"`
+	CommandCost             float64 `json:"commandCost"`
+	WakeCalls               int64   `json:"wakeCalls"`
+	WakeCost                float64 `json:"wakeCost"`
+	StreamSignals           int64   `json:"streamSignals"`
+	StreamCost              float64 `json:"streamCost"`
+	EstimatedCost           float64 `json:"estimatedCost"`
+	MonthlyDiscount         float64 `json:"monthlyDiscount"`
+	NetCost                 float64 `json:"netCost"`
+	MonthStarted            string  `json:"monthStarted"`
+	DiscountedDataEligible  bool    `json:"discountedDataEligible"`
+	EstimatedCostUpperBound bool    `json:"estimatedCostUpperBound"`
 }
 
 func handleAPIUsage(ctrl *controller.Controller) http.HandlerFunc {
@@ -354,17 +356,19 @@ func handleAPIUsage(ctrl *controller.Controller) http.HandlerFunc {
 			net = 0
 		}
 		resp := apiUsageResponse{
-			DataCalls:       usage.DataCalls,
-			DataCost:        dataCost,
-			CommandCalls:    usage.CommandCalls,
-			CommandCost:     cmdCost,
-			WakeCalls:       usage.WakeCalls,
-			WakeCost:        wakeCost,
-			StreamSignals:   usage.StreamSignals,
-			StreamCost:      streamCost,
-			EstimatedCost:   usage.EstimatedCost,
-			MonthlyDiscount: monthlyCredit,
-			NetCost:         net,
+			DataCalls:               usage.DataCalls,
+			DataCost:                dataCost,
+			CommandCalls:            usage.CommandCalls,
+			CommandCost:             cmdCost,
+			WakeCalls:               usage.WakeCalls,
+			WakeCost:                wakeCost,
+			StreamSignals:           usage.StreamSignals,
+			StreamCost:              streamCost,
+			EstimatedCost:           usage.EstimatedCost,
+			MonthlyDiscount:         monthlyCredit,
+			NetCost:                 net,
+			DiscountedDataEligible:  usage.DiscountedDataEligible,
+			EstimatedCostUpperBound: usage.DiscountedDataEligible,
 		}
 		if !usage.MonthStarted.IsZero() {
 			resp.MonthStarted = usage.MonthStarted.Format("2006-01-02")

@@ -12,11 +12,19 @@ export function APIUsageCard() {
   });
 
   return (
-    <Card title="Tesla API Usage (this month)">
+    <Card title="Tesla API Usage Estimate (this month)">
       {isLoading && <p className="text-xs text-gray-500">Loading…</p>}
       {error && <p className="text-xs text-red-400">{getErrorMessage(error)}</p>}
       {data && (
         <div className="space-y-3">
+          <p className="text-xs text-gray-400">
+            Local estimate based on billable HTTP responses. Tesla Developer Dashboard remains the billing source of truth.
+          </p>
+          {data.estimatedCostUpperBound && (
+            <p className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
+              `discounted_device_data` is active for this vehicle. Tesla documents the eligibility flag but not the discounted rate, so Data and total cost are shown as upper-bound estimates.
+            </p>
+          )}
           <UsageBar label="Data" calls={data.dataCalls} cost={data.dataCost} budget={data.monthlyDiscount / 4} />
           <UsageBar label="Command" calls={data.commandCalls} cost={data.commandCost} budget={data.monthlyDiscount / 4} />
           <UsageBar label="Wake" calls={data.wakeCalls} cost={data.wakeCost} budget={data.monthlyDiscount / 4} />
@@ -29,6 +37,8 @@ export function APIUsageCard() {
               v={`$${data.netCost.toFixed(2)}`}
               vClass={data.netCost > 0 ? "text-red-400" : "text-green-400"}
             />
+            {data.discountedDataEligible && <Row k="Discounted data" v="Eligible" />}
+            <Row k="Billing truth" v="Tesla Developer Dashboard" />
             {data.monthStarted && (
               <Row k="Month started" v={new Date(data.monthStarted).toLocaleDateString()} />
             )}

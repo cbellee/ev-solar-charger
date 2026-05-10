@@ -31,12 +31,13 @@ type ChargeState struct {
 
 // APIUsage tracks Tesla Fleet API call counts for the current billing month.
 type APIUsage struct {
-	DataCalls     int64     `json:"dataCalls"`
-	CommandCalls  int64     `json:"commandCalls"`
-	WakeCalls     int64     `json:"wakeCalls"`
-	StreamSignals int64     `json:"streamSignals"`
-	MonthStarted  time.Time `json:"monthStarted"`
-	EstimatedCost float64   `json:"estimatedCost"`
+	DataCalls              int64     `json:"dataCalls"`
+	CommandCalls           int64     `json:"commandCalls"`
+	WakeCalls              int64     `json:"wakeCalls"`
+	StreamSignals          int64     `json:"streamSignals"`
+	MonthStarted           time.Time `json:"monthStarted"`
+	EstimatedCost          float64   `json:"estimatedCost"`
+	DiscountedDataEligible bool      `json:"discountedDataEligible"`
 }
 
 // APIUsageTracker provides thread-safe tracking of Tesla API usage per billing month.

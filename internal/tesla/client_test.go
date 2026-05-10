@@ -239,6 +239,81 @@ func Test_GetChargeState_vehicleOffline(t *testing.T) {
 	}
 }
 
+func Test_GetChargeState_refreshesFleetStatusCache(t *testing.T) {
+	var fleetStatusCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"charge_state": map[string]any{
+					"charging_state": "Stopped",
+				},
+				"state": "online",
+			},
+		})
+	})
+	mux.HandleFunc("/api/1/vehicles/fleet_status", func(w http.ResponseWriter, r *http.Request) {
+		fleetStatusCalls++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !strings.Contains(string(body), "TEST_VIN") {
+			t.Fatalf("fleet_status body = %s, want VIN payload", string(body))
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"vin":                    "TEST_VIN",
+				"discounted_device_data": true,
+			},
+		})
+	})
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+
+	for range 2 {
+		if _, err := c.GetChargeState(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	usage := c.GetAPIUsage()
+	if !usage.DiscountedDataEligible {
+		t.Fatal("DiscountedDataEligible = false, want true")
+	}
+	if fleetStatusCalls != 1 {
+		t.Fatalf("fleet_status calls = %d, want 1 cached refresh", fleetStatusCalls)
+	}
+	if usage.DataCalls != 2 {
+		t.Fatalf("DataCalls = %d, want 2 charge-state calls only", usage.DataCalls)
+	}
+}
+
+func Test_GetChargeState_ignoresFleetStatusFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"charge_state": map[string]any{
+					"charging_state": "Stopped",
+				},
+				"state": "online",
+			},
+		})
+	})
+	mux.HandleFunc("/api/1/vehicles/fleet_status", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad request"}`))
+	})
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+
+	if _, err := c.GetChargeState(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.GetAPIUsage().DiscountedDataEligible {
+		t.Fatal("DiscountedDataEligible = true, want false when fleet_status fails")
+	}
+}
+
 func Test_SetChargingAmps_valid(t *testing.T) {
 	var receivedAmps int
 	mux := http.NewServeMux()
@@ -373,6 +448,10 @@ func Test_tokenRefresh_onExpiry(t *testing.T) {
 	if cs.State != "Stopped" {
 		t.Errorf("State = %q, want %q", cs.State, "Stopped")
 	}
+	usage := c.GetAPIUsage()
+	if usage.DataCalls != 2 {
+		t.Fatalf("DataCalls = %d, want 2 billable responses (401 + retry success)", usage.DataCalls)
+	}
 }
 
 func Test_tokenRefresh_failure(t *testing.T) {
@@ -403,6 +482,10 @@ func Test_doRequest_serverError(t *testing.T) {
 	_, err := c.doRequest(context.Background(), http.MethodPost, path, nil)
 	if err == nil {
 		t.Fatal("expected error for 500 response")
+	}
+	usage := c.GetAPIUsage()
+	if usage.CommandCalls != 0 {
+		t.Fatalf("CommandCalls = %d, want 0 for 500 response", usage.CommandCalls)
 	}
 }
 

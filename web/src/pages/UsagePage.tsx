@@ -27,6 +27,13 @@ const rangeHours: Record<Range, number | null> = {
 export default function UsagePage() {
   const [range, setRange] = useState<Range>("7d");
 
+  const { data: usageSummary } = useQuery({
+    queryKey: ["api-usage"],
+    queryFn: api.getAPIUsage,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["usage-history"],
     queryFn: () => api.getAPIUsageHistory(),
@@ -103,7 +110,7 @@ export default function UsagePage() {
           </Field>
           {latest && (
             <div className="ml-auto flex flex-wrap gap-4 text-xs text-gray-300">
-              <Stat label="Latest cost" value={`$${latest.cost.toFixed(2)}`} />
+              <Stat label="Latest est. cost" value={`$${latest.cost.toFixed(2)}`} />
               <Stat label="Data" value={latest.data.toLocaleString()} />
               <Stat label="Command" value={latest.command.toLocaleString()} />
               <Stat label="Wake" value={latest.wake.toLocaleString()} />
@@ -111,6 +118,15 @@ export default function UsagePage() {
             </div>
           )}
         </div>
+
+        <p className="text-xs text-gray-400 mb-4">
+          These charts track the app&apos;s local estimate of billable HTTP responses and stored usage snapshots. Tesla Developer Dashboard remains the authoritative source for billed totals and may differ due to pricing flags, retries, rounding, or unsupported categories.
+        </p>
+        {usageSummary?.estimatedCostUpperBound && (
+          <p className="text-xs text-amber-200 mb-4 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+            `discounted_device_data` is currently reported for this vehicle. Tesla does not publish the discounted rate in the Fleet API docs, so Data and total costs shown here should be treated as upper-bound estimates.
+          </p>
+        )}
 
         {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
         {error && (
@@ -231,7 +247,7 @@ export default function UsagePage() {
             {deltas.length > 0 && (
               <>
                 <h3 className="text-sm font-medium text-gray-300 mt-6 mb-2">
-                  Calls per snapshot interval
+                  Estimated billable requests per snapshot interval
                 </h3>
                 <div className="h-56 w-full">
                   <ResponsiveContainer>

@@ -569,6 +569,12 @@ func Test_handleAPIUsage_returnsUsageData(t *testing.T) {
 	if resp.MonthStarted != "" {
 		t.Errorf("MonthStarted = %q, want empty string for unavailable usage", resp.MonthStarted)
 	}
+	if resp.DiscountedDataEligible {
+		t.Error("DiscountedDataEligible = true, want false")
+	}
+	if resp.EstimatedCostUpperBound {
+		t.Error("EstimatedCostUpperBound = true, want false")
+	}
 }
 
 func Test_handleAPIUsageHistory_returnsSnapshots(t *testing.T) {

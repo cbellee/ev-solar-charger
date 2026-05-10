@@ -87,6 +87,8 @@ export interface APIUsageResponse {
   monthlyDiscount: number;
   netCost: number;
   monthStarted: string;
+  discountedDataEligible: boolean;
+  estimatedCostUpperBound: boolean;
 }
 
 export interface APIUsageSnapshot {
