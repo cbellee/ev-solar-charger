@@ -587,10 +587,9 @@ Calls the Tesla Fleet API `vehicle_data` endpoint to get:
 | Controller State | Poll Interval | Rationale |
 |---|---|---|
 | No cached state | Immediate | Need initial vehicle state |
-| Charging | `TESLA_CHARGING_POLL_SECONDS` (default 120s) | Track battery % and actual amps |
-| Idle with surplus ≥ min amps | `TESLA_IDLE_POLL_SECONDS` (default 300s) | Check if car is still plugged in |
-| Idle without surplus | Skipped | No reason to call Tesla |
-| Wake pending | Skipped | Wake command handles its own polling |
+| Charging | `TESLA_CHARGING_POLL_SECONDS` (default 300s) | Track battery % and actual amps at a lower data-call rate |
+| Idle / monitoring | `TESLA_IDLE_POLL_SECONDS` (default 1800s) | Detect out-of-band charge starts or plug-state changes without frequent polling |
+| Wake pending | `WAKE_RETRY_INTERVAL_SECONDS` (default 300s) | Re-check periodically if the car still has not come online after a wake |
 
 Between API calls, the controller uses a cached charge state so the UI snapshot and state machine continue updating from inverter data.
 
@@ -624,7 +623,7 @@ The controller maintains six states:
 
 **Stopping a charge (deadband):** If surplus drops below `minChargeAmps` for `DEADBAND_POLLS` consecutive ticks (default 3 × 10s = 30s), the controller calls `StopCharging`. This prevents flapping on transient cloud cover.
 
-**Waking the car:** If the car is asleep and surplus exceeds minimum for `WAKE_THRESHOLD_POLLS` consecutive ticks (default 6 × 10s = 60s), the controller sends a wake-up command and waits for the car to come online.
+**Waking the car:** If the car is asleep and surplus exceeds minimum for `WAKE_THRESHOLD_POLLS` consecutive ticks (default 6 × 10s = 60s), the controller sends a wake-up command. The Tesla client performs two delayed charge-state checks across 30 seconds, then the controller falls back to `WAKE_RETRY_INTERVAL_SECONDS` for longer wake-pending rechecks if the vehicle is still offline.
 
 ### 5. Persist data
 
@@ -738,8 +737,8 @@ All configuration is via environment variables:
 | `WAKE_THRESHOLD_POLLS` | No | `6` | Consecutive surplus ticks before waking car |
 | `WAKE_MIN_AMPS_MARGIN` | No | `2` | Extra amps above `MIN_CHARGE_AMPS` required to initiate a wake (avoids transient-surplus wakes) |
 | `WAKE_AFTER_NON_ACTIONABLE_BACKOFF_SECONDS` | No | `1800` | Suppress wakes for this many seconds after observing the car in a non-actionable state (Disconnected, Complete) |
-| `TESLA_CHARGING_POLL_SECONDS` | No | `120` | Seconds between Tesla API polls while charging |
-| `TESLA_IDLE_POLL_SECONDS` | No | `300` | Seconds between Tesla API polls when idle with surplus |
+| `TESLA_CHARGING_POLL_SECONDS` | No | `300` | Seconds between Tesla API polls while charging |
+| `TESLA_IDLE_POLL_SECONDS` | No | `1800` | Seconds between Tesla API polls while idle or monitoring |
 | `AMPS_CHANGE_THRESHOLD` | No | `2` | Minimum amp change to send a `SetChargingAmps` command |
 | `AMPS_ADJUST_INTERVAL_SECONDS` | No | `60` | Minimum time between automatic `SetChargingAmps` commands while charging |
 | `HTTP_HOST` | No | `0.0.0.0` | Bind address for the HTTP listener |

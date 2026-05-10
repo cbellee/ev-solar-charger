@@ -272,7 +272,7 @@ func Load() (Config, error) {
 	}
 	cfg.CommandFailureBackoff = time.Duration(commandFailureBackoffSec) * time.Second
 
-	teslaChargingSec, err := envInt("TESLA_CHARGING_POLL_SECONDS", 120)
+	teslaChargingSec, err := envInt("TESLA_CHARGING_POLL_SECONDS", 300)
 	if err != nil {
 		return Config{}, err
 	}
@@ -281,7 +281,7 @@ func Load() (Config, error) {
 	}
 	cfg.TeslaChargingPollInterval = time.Duration(teslaChargingSec) * time.Second
 
-	teslaIdleSec, err := envInt("TESLA_IDLE_POLL_SECONDS", 300)
+	teslaIdleSec, err := envInt("TESLA_IDLE_POLL_SECONDS", 1800)
 	if err != nil {
 		return Config{}, err
 	}

@@ -34,6 +34,8 @@ const authURL = "https://fleet-auth.prd.vn.cloud.tesla.com"
 
 const fleetStatusRefreshInterval = 6 * time.Hour
 
+var defaultWakeStatusCheckDelays = []time.Duration{10 * time.Second, 20 * time.Second}
+
 // TeslaClient implements VehicleController using the Tesla Fleet API.
 type TeslaClient struct {
 	httpClient   *http.Client
@@ -50,6 +52,7 @@ type TeslaClient struct {
 	minAmps      int
 	maxAmps      int
 	usage        *APIUsageTracker
+	wakeDelays   []time.Duration
 
 	mu           sync.Mutex
 	accessToken  string
@@ -522,7 +525,8 @@ func (c *TeslaClient) StopCharging(ctx context.Context) error {
 	return nil
 }
 
-// WakeUp wakes the vehicle, polling until online or timeout.
+// WakeUp wakes the vehicle, then checks vehicle_data on a bounded backoff
+// schedule instead of polling every few seconds.
 func (c *TeslaClient) WakeUp(ctx context.Context) error {
 	path := fmt.Sprintf("/api/1/vehicles/%s/wake_up", c.vin)
 	resp, err := c.doRequest(ctx, http.MethodPost, path, nil)
@@ -531,20 +535,33 @@ func (c *TeslaClient) WakeUp(ctx context.Context) error {
 	}
 	resp.Body.Close()
 
-	// Poll for up to 30 seconds.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
+	delays := c.wakeDelays
+	if len(delays) == 0 {
+		delays = defaultWakeStatusCheckDelays
+	}
+
+	var totalDelay time.Duration
+	for _, delay := range delays {
+		if delay < 0 {
+			delay = 0
+		}
+		totalDelay += delay
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+
 		cs, err := c.GetChargeState(ctx)
 		if err == nil && cs.IsOnline {
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
 	}
-	return fmt.Errorf("tesla: wake_up timed out after 30s")
+	if totalDelay <= 0 {
+		totalDelay = 30 * time.Second
+	}
+	return fmt.Errorf("tesla: wake_up timed out after %s", totalDelay)
 }
 
 // GetAPIUsage returns the current monthly API usage snapshot.

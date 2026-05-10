@@ -107,13 +107,14 @@ The controller previously called the Tesla Fleet API (`vehicle_data`) on every t
 
 ### State-aware polling
 Tesla API calls are now gated by `shouldPollTesla()` which considers the controller state:
-- **Charging:** polls every `TESLA_CHARGING_POLL_SECONDS` (default 120s) — enough to track battery % and adjust amps at lower cost.
-- **Idle with surplus:** polls every `TESLA_IDLE_POLL_SECONDS` (default 300s) — checks if car is plugged in before waking.
-- **Idle without surplus:** skips entirely — no reason to poll until surplus appears.
-- **Wake pending:** skips — the wake command handles its own polling loop.
+- **Charging:** polls every `TESLA_CHARGING_POLL_SECONDS` (default 300s) — enough to track battery % and adjust amps at lower cost.
+- **Idle / monitoring:** polls every `TESLA_IDLE_POLL_SECONDS` (default 1800s) — catches out-of-band state changes without a constant data-call burn.
+- **Wake pending:** polls every `WAKE_RETRY_INTERVAL_SECONDS` (default 300s) if the wake has not completed yet.
 - **No cached state:** polls immediately on first call.
 
 Between API calls, `cachedChargeState` keeps the UI and state machine working from local inverter data.
+
+The `WakeUp` flow also no longer polls `vehicle_data` every 2 seconds. It now performs two delayed status checks across 30 seconds, capping wake follow-up data calls at two per wake attempt.
 
 ### Amps change hysteresis
 When charging, `SetChargingAmps` is only sent when the change exceeds `AMPS_CHANGE_THRESHOLD` (default 2A) and the last automatic amp change is older than `AMPS_ADJUST_INTERVAL_SECONDS` (default 60s). This avoids command oscillation from minor solar fluctuations.
@@ -121,8 +122,8 @@ When charging, `SetChargingAmps` is only sent when the change exceeds `AMPS_CHAN
 ### New environment variables
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TESLA_CHARGING_POLL_SECONDS` | 120 | Poll interval while charging |
-| `TESLA_IDLE_POLL_SECONDS` | 300 | Poll interval when idle with surplus |
+| `TESLA_CHARGING_POLL_SECONDS` | 300 | Poll interval while charging |
+| `TESLA_IDLE_POLL_SECONDS` | 1800 | Poll interval while idle or monitoring |
 | `AMPS_CHANGE_THRESHOLD` | 2 | Minimum amp delta to send a command |
 | `AMPS_ADJUST_INTERVAL_SECONDS` | 60 | Minimum time between automatic amp-adjust commands |
 

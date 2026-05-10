@@ -35,12 +35,13 @@ The inverter is polled every tick (free, local Modbus call), but Tesla API calls
 | Controller State | Poll Interval | Rationale |
 |------------------|---------------|-----------|
 | First call (no cache) | Immediate | Need initial vehicle state |
-| Charging | `TESLA_CHARGING_POLL_SECONDS` (default 120s) | Track battery % and actual amps with lower data-call spend |
-| Idle/Monitoring with surplus ≥ min amps | `TESLA_IDLE_POLL_SECONDS` (default 300s) | Check if car is still plugged in before waking |
-| Idle/Monitoring, no surplus | Skipped entirely | No reason to poll — surplus must appear first |
-| Wake Pending | Skipped | Wake command handles its own polling loop |
+| Charging | `TESLA_CHARGING_POLL_SECONDS` (default 300s) | Track battery % and actual amps with lower data-call spend |
+| Idle / Monitoring | `TESLA_IDLE_POLL_SECONDS` (default 1800s) | Catch out-of-band state changes without frequent polling |
+| Wake Pending | `WAKE_RETRY_INTERVAL_SECONDS` (default 300s) | Re-check periodically if the car still has not come online |
 
 Between Tesla API calls, the controller uses `cachedChargeState` so the UI snapshot and state machine continue updating from inverter data.
+
+The `WakeUp` path also uses a bounded follow-up schedule now: two delayed `vehicle_data` checks across 30 seconds instead of a 2-second polling loop. That caps wake follow-up data usage at two calls per wake attempt.
 
 ### 2. Amps Change Hysteresis
 
@@ -54,8 +55,8 @@ Small fluctuations (±1A) are absorbed without any API call. Large ramps (e.g. m
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TESLA_CHARGING_POLL_SECONDS` | 120 | Interval between Tesla API polls while actively charging |
-| `TESLA_IDLE_POLL_SECONDS` | 300 | Interval between Tesla API polls when idle but surplus is available |
+| `TESLA_CHARGING_POLL_SECONDS` | 300 | Interval between Tesla API polls while actively charging |
+| `TESLA_IDLE_POLL_SECONDS` | 1800 | Interval between Tesla API polls while idle or monitoring |
 | `AMPS_CHANGE_THRESHOLD` | 2 | Minimum amp change required to send a `SetChargingAmps` command |
 | `AMPS_ADJUST_INTERVAL_SECONDS` | 60 | Minimum time between automatic `SetChargingAmps` commands while charging |
 
@@ -63,19 +64,20 @@ All three have validation (≥ 1 for intervals, ≥ 0 for threshold) and are opt
 
 ## Estimated Cost Impact
 
-Assuming 6 hours charging, 2 hours monitoring, 16 hours idle per day:
+Assuming 6 hours charging, 2 hours monitoring, 16 hours idle per day, plus two wake attempts:
 
 | Category | Before (per day) | After (per day) |
 |----------|-------------------|-----------------|
-| Data calls (charging) | 2,160 ($4.32) | 180 ($0.36) |
-| Data calls (monitoring) | 720 ($1.44) | 24 ($0.05) |
-| Data calls (idle) | 5,760 ($11.52) | 0 ($0.00) |
+| Data calls (charging) | 2,160 ($4.32) | 72 ($0.14) |
+| Data calls (monitoring) | 720 ($1.44) | 4 ($0.01) |
+| Data calls (idle) | 5,760 ($11.52) | 32 ($0.06) |
+| Wake follow-up data calls | Included above | 4 ($0.01) |
 | Command calls | ~100 ($0.10) | ~15 ($0.02) |
 | Wake calls | ~2 ($0.04) | ~2 ($0.04) |
-| **Daily total** | **~$17.42** | **~$0.47** |
-| **Monthly total** | **~$523** | **~$14 − $10 discount ≈ $4** |
+| **Daily total** | **~$17.42** | **~$0.28** |
+| **Monthly total** | **~$523** | **~$8.40 − $10 discount ≈ $0** |
 
-This represents approximately a **97% cost reduction** while maintaining responsive solar-tracking behaviour during active charging.
+This represents approximately a **98% cost reduction** while maintaining responsive solar-tracking behaviour during active charging.
 
 ## Trade-offs
 

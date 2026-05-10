@@ -131,11 +131,11 @@ func Test_Load_defaultsApplied(t *testing.T) {
 	if cfg.TeslaTestMode {
 		t.Fatal("TeslaTestMode = true, want false")
 	}
-	if cfg.TeslaChargingPollInterval != 120*time.Second {
-		t.Errorf("TeslaChargingPollInterval = %v, want 120s", cfg.TeslaChargingPollInterval)
+	if cfg.TeslaChargingPollInterval != 300*time.Second {
+		t.Errorf("TeslaChargingPollInterval = %v, want 300s", cfg.TeslaChargingPollInterval)
 	}
-	if cfg.TeslaIdlePollInterval != 300*time.Second {
-		t.Errorf("TeslaIdlePollInterval = %v, want 300s", cfg.TeslaIdlePollInterval)
+	if cfg.TeslaIdlePollInterval != 1800*time.Second {
+		t.Errorf("TeslaIdlePollInterval = %v, want 1800s", cfg.TeslaIdlePollInterval)
 	}
 	if cfg.AmpsChangeThreshold != 2 {
 		t.Errorf("AmpsChangeThreshold = %d, want 2", cfg.AmpsChangeThreshold)

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cbellee/ev-solar-charger/internal/config"
 )
@@ -401,11 +402,13 @@ func Test_StopCharging_success(t *testing.T) {
 }
 
 func Test_WakeUp_immediatelyOnline(t *testing.T) {
+	vehicleDataCalls := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/1/vehicles/TEST_VIN/wake_up", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"result": true}})
 	})
 	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {
+		vehicleDataCalls++
 		json.NewEncoder(w).Encode(map[string]any{
 			"response": map[string]any{
 				"charge_state": map[string]any{
@@ -417,8 +420,76 @@ func Test_WakeUp_immediatelyOnline(t *testing.T) {
 		})
 	})
 	c, _ := newTestClient(t, mux, defaultAuthHandler())
+	c.wakeDelays = []time.Duration{0}
 	if err := c.WakeUp(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if vehicleDataCalls != 1 {
+		t.Fatalf("vehicle_data calls = %d, want 1", vehicleDataCalls)
+	}
+}
+
+func Test_WakeUp_awakensAfterDelayedRetry(t *testing.T) {
+	vehicleDataCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/wake_up", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"result": true}})
+	})
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {
+		vehicleDataCalls++
+		state := "asleep"
+		if vehicleDataCalls == 2 {
+			state = "online"
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"charge_state": map[string]any{
+					"charging_state":    "Stopped",
+					"charge_port_latch": "Engaged",
+				},
+				"state": state,
+			},
+		})
+	})
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+	c.wakeDelays = []time.Duration{0, 0}
+	if err := c.WakeUp(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vehicleDataCalls != 2 {
+		t.Fatalf("vehicle_data calls = %d, want 2", vehicleDataCalls)
+	}
+}
+
+func Test_WakeUp_timeoutAfterBoundedChecks(t *testing.T) {
+	vehicleDataCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/wake_up", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"result": true}})
+	})
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {
+		vehicleDataCalls++
+		json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"charge_state": map[string]any{
+					"charging_state":    "Stopped",
+					"charge_port_latch": "Engaged",
+				},
+				"state": "asleep",
+			},
+		})
+	})
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+	c.wakeDelays = []time.Duration{0, 0}
+	err := c.WakeUp(context.Background())
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want timeout", err)
+	}
+	if vehicleDataCalls != 2 {
+		t.Fatalf("vehicle_data calls = %d, want 2", vehicleDataCalls)
 	}
 }
 
