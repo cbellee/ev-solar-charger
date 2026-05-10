@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - fleet-telemetry
     tags:
       - "v*"
   pull_request:
