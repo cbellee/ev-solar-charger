@@ -218,6 +218,20 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	// 8. Create controller.
 	ctrl := controller.New(inv, vehicle, store, cfg, logger, metrics)
 
+	// 8a. Restore persisted free-window settings if present.
+	if persisted, ok, ferr := store.GetFreeWindowSettings(ctx); ferr != nil {
+		logger.Warn("failed to load persisted free-window settings", "error", ferr)
+	} else if ok {
+		if err := ctrl.SetFreeWindowSettings(controller.FreeWindowSettings{
+			Enabled:   persisted.Enabled,
+			StartHour: persisted.StartHour,
+			EndHour:   persisted.EndHour,
+			Timezone:  persisted.Timezone,
+		}); err != nil {
+			logger.Warn("persisted free-window settings invalid; keeping config defaults", "error", err)
+		}
+	}
+
 	// 8b. Restore Tesla API usage counters from persisted snapshots in the
 	// current calendar month. Counters are monotonic within a month, so we
 	// take the maximum of each counter across all snapshots — this is

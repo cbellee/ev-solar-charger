@@ -43,6 +43,11 @@ type StateSnapshot struct {
 	State              State     `json:"state"`
 	Mode               Mode      `json:"mode"`
 	TestMode           bool      `json:"testMode"`
+	FreeWindowEnabled  bool      `json:"freeWindowEnabled"`
+	FreeWindowStart    int       `json:"freeWindowStartHour"`
+	FreeWindowEnd      int       `json:"freeWindowEndHour"`
+	FreeWindowTimezone string    `json:"freeWindowTimezone"`
+	FreeWindowActive   bool      `json:"freeWindowActive"`
 	PVWatts            float64   `json:"pvWatts"`
 	GridWatts          float64   `json:"gridWatts"`
 	LoadWatts          float64   `json:"loadWatts"`
@@ -63,6 +68,15 @@ type StateSnapshot struct {
 	LastError          string    `json:"lastError"`
 }
 
+// FreeWindowSettings represents runtime free-window configuration.
+type FreeWindowSettings struct {
+	Enabled   bool   `json:"enabled"`
+	StartHour int    `json:"startHour"`
+	EndHour   int    `json:"endHour"`
+	Timezone  string `json:"timezone"`
+	Active    bool   `json:"active"`
+}
+
 // Controller manages the solar-to-EV charging logic.
 type Controller struct {
 	inverter inverter.InverterReader
@@ -81,6 +95,11 @@ type Controller struct {
 	lastChargeAmps     int
 	lastKnownPluggedIn bool
 	lastOnlineAt       time.Time
+	freeWindowEnabled  bool
+	freeWindowStart    int
+	freeWindowEnd      int
+	freeWindowTimezone *time.Location
+	freeWindowTZName   string
 
 	accumulator     []accSample
 	currentMinute   time.Time
@@ -117,19 +136,45 @@ var tracer = otel.Tracer("controller")
 // New creates a new Controller.
 func New(inv inverter.InverterReader, veh tesla.VehicleController, store storage.Store,
 	cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) *Controller {
+	freeWindowStart := cfg.FreeWindowStartHour
+	freeWindowEnd := cfg.FreeWindowEndHour
+	if freeWindowEnd == 0 {
+		freeWindowStart = 11
+		freeWindowEnd = 14
+	}
+
+	freeWindowLoc := cfg.FreeWindowTimezone
+	if freeWindowLoc == nil {
+		if cfg.WakeTimezone != nil {
+			freeWindowLoc = cfg.WakeTimezone
+		} else {
+			freeWindowLoc = time.Local
+		}
+	}
+	freeWindowTZName := freeWindowLoc.String()
+
 	return &Controller{
-		inverter: inv,
-		vehicle:  veh,
-		store:    store,
-		cfg:      cfg,
-		logger:   logger,
-		metrics:  metrics,
-		state:    StateIdle,
-		mode:     ModeAuto,
+		inverter:           inv,
+		vehicle:            veh,
+		store:              store,
+		cfg:                cfg,
+		logger:             logger,
+		metrics:            metrics,
+		state:              StateIdle,
+		mode:               ModeAuto,
+		freeWindowEnabled:  cfg.FreeWindowEnabled,
+		freeWindowStart:    freeWindowStart,
+		freeWindowEnd:      freeWindowEnd,
+		freeWindowTimezone: freeWindowLoc,
+		freeWindowTZName:   freeWindowTZName,
 		snapshot: StateSnapshot{
-			State:    StateIdle,
-			Mode:     ModeAuto,
-			TestMode: cfg.TeslaTestMode,
+			State:              StateIdle,
+			Mode:               ModeAuto,
+			TestMode:           cfg.TeslaTestMode,
+			FreeWindowEnabled:  cfg.FreeWindowEnabled,
+			FreeWindowStart:    freeWindowStart,
+			FreeWindowEnd:      freeWindowEnd,
+			FreeWindowTimezone: freeWindowTZName,
 		},
 	}
 }
@@ -244,6 +289,10 @@ func (c *Controller) Tick(ctx context.Context) {
 
 	// Step 5: Calculate available amps.
 	availableAmps := c.calculateAvailableAmps(power.SurplusWatts, power.GridWatts, chargeState)
+	freeWindowActive := c.freeWindowOpen(time.Now())
+	if freeWindowActive {
+		availableAmps = c.cfg.MaxChargeAmps
+	}
 
 	// Step 6: State machine decision.
 	if availableAmps >= c.cfg.MinChargeAmps {
@@ -260,7 +309,7 @@ func (c *Controller) Tick(ctx context.Context) {
 			// followed immediately by "waiting for surplus". The margin only
 			// applies to the wake decision; once the car is online the
 			// regular MinChargeAmps threshold governs charge start.
-			if availableAmps < c.cfg.MinChargeAmps+c.cfg.WakeMinAmpsMargin {
+			if !freeWindowActive && availableAmps < c.cfg.MinChargeAmps+c.cfg.WakeMinAmpsMargin {
 				c.transitionTo(ctx, StateMonitoring, "surplus below wake margin")
 				c.updateSnapshot(power, chargeState, availableAmps)
 				c.accumulateSample(power, chargeState, availableAmps, ctx)
@@ -387,6 +436,9 @@ func (c *Controller) Tick(ctx context.Context) {
 
 func (c *Controller) tickTestMode(ctx context.Context, power inverter.PowerData) {
 	availableAmps := c.calculateAvailableAmps(power.SurplusWatts, power.GridWatts, tesla.ChargeState{})
+	if c.freeWindowOpen(time.Now()) {
+		availableAmps = c.cfg.MaxChargeAmps
+	}
 	chargeState := tesla.ChargeState{State: "Projected only"}
 
 	if availableAmps >= c.cfg.MinChargeAmps {
@@ -620,7 +672,31 @@ func (c *Controller) shouldAttemptWake() bool {
 	if !c.wakeWindowOpenLocked(time.Now()) {
 		return false
 	}
+	// Free-window no longer bypasses wake hours; wake policy remains authoritative.
+	if c.freeWindowOpenLocked(time.Now()) {
+		return true
+	}
 	return true
+}
+
+func (c *Controller) freeWindowOpen(now time.Time) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.freeWindowOpenLocked(now)
+}
+
+// freeWindowOpenLocked returns true if the local hour is within the configured
+// free-electricity window. Caller must hold c.mu (read or write).
+func (c *Controller) freeWindowOpenLocked(now time.Time) bool {
+	if !c.freeWindowEnabled {
+		return false
+	}
+	loc := c.freeWindowTimezone
+	if loc == nil {
+		loc = time.Local
+	}
+	hour := now.In(loc).Hour()
+	return hour >= c.freeWindowStart && hour < c.freeWindowEnd
 }
 
 // wakeWindowOpenLocked returns true if the local hour is within the configured
@@ -741,6 +817,11 @@ func (c *Controller) updateSnapshot(power inverter.PowerData, cs tesla.ChargeSta
 		State:              c.state,
 		Mode:               c.mode,
 		TestMode:           c.cfg.TeslaTestMode,
+		FreeWindowEnabled:  c.freeWindowEnabled,
+		FreeWindowStart:    c.freeWindowStart,
+		FreeWindowEnd:      c.freeWindowEnd,
+		FreeWindowTimezone: c.freeWindowTZName,
+		FreeWindowActive:   c.freeWindowOpenLocked(time.Now()),
 		PVWatts:            power.PVWatts,
 		GridWatts:          power.GridWatts,
 		LoadWatts:          power.LoadWatts,
@@ -759,6 +840,65 @@ func (c *Controller) updateSnapshot(power inverter.PowerData, cs tesla.ChargeSta
 		ConsecutiveSurplus: c.consecutiveSurplus,
 		LastUpdate:         time.Now(),
 	}
+}
+
+func validateFreeWindowSettings(startHour, endHour int, timezone string) error {
+	if startHour < 0 || startHour > 23 {
+		return fmt.Errorf("controller: start hour must be in [0,23], got %d", startHour)
+	}
+	if endHour < 1 || endHour > 24 {
+		return fmt.Errorf("controller: end hour must be in [1,24], got %d", endHour)
+	}
+	if endHour <= startHour {
+		return fmt.Errorf("controller: end hour (%d) must be greater than start hour (%d)", endHour, startHour)
+	}
+	if timezone == "" {
+		return fmt.Errorf("controller: timezone is required")
+	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return fmt.Errorf("controller: invalid timezone %q: %w", timezone, err)
+	}
+	return nil
+}
+
+// GetFreeWindowSettings returns a thread-safe copy of the runtime free-window settings.
+func (c *Controller) GetFreeWindowSettings() FreeWindowSettings {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return FreeWindowSettings{
+		Enabled:   c.freeWindowEnabled,
+		StartHour: c.freeWindowStart,
+		EndHour:   c.freeWindowEnd,
+		Timezone:  c.freeWindowTZName,
+		Active:    c.freeWindowOpenLocked(time.Now()),
+	}
+}
+
+// SetFreeWindowSettings updates runtime free-window configuration.
+func (c *Controller) SetFreeWindowSettings(settings FreeWindowSettings) error {
+	if err := validateFreeWindowSettings(settings.StartHour, settings.EndHour, settings.Timezone); err != nil {
+		return err
+	}
+	loc, _ := time.LoadLocation(settings.Timezone)
+
+	c.mu.Lock()
+	c.freeWindowEnabled = settings.Enabled
+	c.freeWindowStart = settings.StartHour
+	c.freeWindowEnd = settings.EndHour
+	c.freeWindowTimezone = loc
+	c.freeWindowTZName = settings.Timezone
+	c.snapshot.FreeWindowEnabled = settings.Enabled
+	c.snapshot.FreeWindowStart = settings.StartHour
+	c.snapshot.FreeWindowEnd = settings.EndHour
+	c.snapshot.FreeWindowTimezone = settings.Timezone
+	c.snapshot.FreeWindowActive = c.freeWindowOpenLocked(time.Now())
+	c.mu.Unlock()
+
+	if c.OnUpdate != nil {
+		c.OnUpdate(c.GetStateSnapshot())
+	}
+
+	return nil
 }
 
 func (c *Controller) accumulateSample(power inverter.PowerData, cs tesla.ChargeState, amps int, ctx context.Context) {

@@ -51,6 +51,12 @@ func (fakeStore) InsertAPIUsage(ctx context.Context, s storage.APIUsageSnapshot)
 func (fakeStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
 	return nil, nil
 }
+func (fakeStore) GetFreeWindowSettings(ctx context.Context) (storage.FreeWindowSettings, bool, error) {
+	return storage.FreeWindowSettings{}, false, nil
+}
+func (fakeStore) SaveFreeWindowSettings(ctx context.Context, s storage.FreeWindowSettings) error {
+	return nil
+}
 func (fakeStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (fakeStore) Close() error                                                      { return nil }
 

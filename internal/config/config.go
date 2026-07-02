@@ -40,6 +40,10 @@ type Config struct {
 	WakeAllowedStartHour          int
 	WakeAllowedEndHour            int
 	WakeTimezone                  *time.Location
+	FreeWindowEnabled             bool
+	FreeWindowStartHour           int
+	FreeWindowEndHour             int
+	FreeWindowTimezone            *time.Location
 	PluggedInStaleAfter           time.Duration
 	ChargeStartRetry              time.Duration
 	CommandFailureBackoff         time.Duration
@@ -253,6 +257,37 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: WAKE_TIMEZONE %q is invalid: %w", tzName, err)
 	}
 	cfg.WakeTimezone = loc
+
+	cfg.FreeWindowEnabled, err = envBool("FREE_WINDOW_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.FreeWindowStartHour, err = envInt("FREE_WINDOW_START_HOUR", 11)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.FreeWindowStartHour < 0 || cfg.FreeWindowStartHour > 23 {
+		return Config{}, fmt.Errorf("config: FREE_WINDOW_START_HOUR must be in [0,23], got %d", cfg.FreeWindowStartHour)
+	}
+
+	cfg.FreeWindowEndHour, err = envInt("FREE_WINDOW_END_HOUR", 14)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.FreeWindowEndHour < 1 || cfg.FreeWindowEndHour > 24 {
+		return Config{}, fmt.Errorf("config: FREE_WINDOW_END_HOUR must be in [1,24], got %d", cfg.FreeWindowEndHour)
+	}
+	if cfg.FreeWindowEndHour <= cfg.FreeWindowStartHour {
+		return Config{}, fmt.Errorf("config: FREE_WINDOW_END_HOUR (%d) must be greater than FREE_WINDOW_START_HOUR (%d)", cfg.FreeWindowEndHour, cfg.FreeWindowStartHour)
+	}
+
+	freeWindowTZName := envOrDefault("FREE_WINDOW_TIMEZONE", tzName)
+	freeWindowLoc, err := time.LoadLocation(freeWindowTZName)
+	if err != nil {
+		return Config{}, fmt.Errorf("config: FREE_WINDOW_TIMEZONE %q is invalid: %w", freeWindowTZName, err)
+	}
+	cfg.FreeWindowTimezone = freeWindowLoc
 
 	chargeStartRetrySec, err := envInt("CHARGE_START_RETRY_SECONDS", 120)
 	if err != nil {

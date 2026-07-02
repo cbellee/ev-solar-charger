@@ -171,6 +171,12 @@ func (m *mockStore) InsertAPIUsage(ctx context.Context, s storage.APIUsageSnapsh
 func (m *mockStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
 	return nil, nil
 }
+func (m *mockStore) GetFreeWindowSettings(ctx context.Context) (storage.FreeWindowSettings, bool, error) {
+	return storage.FreeWindowSettings{}, false, nil
+}
+func (m *mockStore) SaveFreeWindowSettings(ctx context.Context, s storage.FreeWindowSettings) error {
+	return nil
+}
 func (m *mockStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (m *mockStore) Close() error                                                      { return nil }
 
@@ -1131,6 +1137,110 @@ func Test_Tick_offlineSurplusAboveWakeMargin(t *testing.T) {
 	}
 	if !wakeFound {
 		t.Fatalf("expected WakeUp call, got %v", veh.getCalls())
+	}
+}
+
+func Test_Tick_freeWindowOverridesSurplusAndStartsCharging(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.FreeWindowEnabled = true
+	cfg.FreeWindowStartHour = 0
+	cfg.FreeWindowEndHour = 24
+	cfg.FreeWindowTimezone = time.UTC
+
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 1000, GridWatts: 1000, SurplusWatts: 0}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"}}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+
+	ctrl.Tick(context.Background())
+
+	calls := veh.getCalls()
+	if len(calls) < 2 {
+		t.Fatalf("expected SetChargingAmps + StartCharging, got %v", calls)
+	}
+	if calls[0] != "SetChargingAmps:32" {
+		t.Fatalf("first call = %q, want %q", calls[0], "SetChargingAmps:32")
+	}
+	if calls[1] != "StartCharging" {
+		t.Fatalf("second call = %q, want %q", calls[1], "StartCharging")
+	}
+}
+
+func Test_Tick_freeWindowOutsideWindowKeepsSurplusLogic(t *testing.T) {
+	nowHour := time.Now().UTC().Hour()
+	start := (nowHour + 1) % 23
+	end := start + 1
+
+	cfg := defaultCfg()
+	cfg.FreeWindowEnabled = true
+	cfg.FreeWindowStartHour = start
+	cfg.FreeWindowEndHour = end
+	cfg.FreeWindowTimezone = time.UTC
+
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 1000, GridWatts: 1000, SurplusWatts: 0}}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"}}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+
+	ctrl.Tick(context.Background())
+
+	if calls := veh.getCalls(); len(calls) != 0 {
+		t.Fatalf("expected no start outside free window without surplus, got %v", calls)
+	}
+	if state := ctrl.GetStateSnapshot().State; state != StateMonitoring {
+		t.Fatalf("state = %q, want %q", state, StateMonitoring)
+	}
+}
+
+func Test_shouldAttemptWake_respectsWakeWindowDuringFreeWindow(t *testing.T) {
+	nowHour := time.Now().UTC().Hour()
+	wakeStart := (nowHour + 1) % 23
+	wakeEnd := wakeStart + 1
+
+	cfg := defaultCfg()
+	cfg.WakeAllowedStartHour = wakeStart
+	cfg.WakeAllowedEndHour = wakeEnd
+	cfg.WakeTimezone = time.UTC
+	cfg.FreeWindowEnabled = true
+	cfg.FreeWindowStartHour = 0
+	cfg.FreeWindowEndHour = 24
+	cfg.FreeWindowTimezone = time.UTC
+
+	ctrl := newTestControllerWithConfig(&mockInverter{}, &mockVehicle{}, &mockStore{}, cfg)
+	ctrl.mu.Lock()
+	ctrl.lastKnownPluggedIn = true
+	ctrl.lastOnlineAt = time.Now()
+	ctrl.lastNonActionableAt = time.Time{}
+	ctrl.mu.Unlock()
+
+	if ctrl.shouldAttemptWake() {
+		t.Fatal("expected wake denied outside wake window even during active free window")
+	}
+}
+
+func Test_SetFreeWindowSettings_validationAndUpdate(t *testing.T) {
+	ctrl := newTestController(&mockInverter{}, &mockVehicle{}, &mockStore{})
+
+	if err := ctrl.SetFreeWindowSettings(FreeWindowSettings{
+		Enabled:   true,
+		StartHour: 14,
+		EndHour:   11,
+		Timezone:  "Australia/Sydney",
+	}); err == nil {
+		t.Fatal("expected validation error for end <= start")
+	}
+
+	err := ctrl.SetFreeWindowSettings(FreeWindowSettings{
+		Enabled:   true,
+		StartHour: 11,
+		EndHour:   14,
+		Timezone:  "Australia/Sydney",
+	})
+	if err != nil {
+		t.Fatalf("SetFreeWindowSettings error: %v", err)
+	}
+
+	settings := ctrl.GetFreeWindowSettings()
+	if !settings.Enabled || settings.StartHour != 11 || settings.EndHour != 14 || settings.Timezone != "Australia/Sydney" {
+		t.Fatalf("settings = %+v, want enabled 11-14 Australia/Sydney", settings)
 	}
 }
 

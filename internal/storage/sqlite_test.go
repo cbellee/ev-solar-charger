@@ -558,3 +558,82 @@ func Test_Prune_deletesAPIUsageSnapshots(t *testing.T) {
 		t.Errorf("remaining DataCalls = %d, want 200", snapshots[0].DataCalls)
 	}
 }
+
+func Test_GetFreeWindowSettings_notFound(t *testing.T) {
+	store := newTestStore(t)
+
+	settings, found, err := store.GetFreeWindowSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetFreeWindowSettings error: %v", err)
+	}
+	if found {
+		t.Fatal("found = true, want false")
+	}
+	if settings != (FreeWindowSettings{}) {
+		t.Fatalf("settings = %+v, want zero value", settings)
+	}
+}
+
+func Test_SaveAndGetFreeWindowSettings_roundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	in := FreeWindowSettings{
+		Enabled:   true,
+		StartHour: 11,
+		EndHour:   14,
+		Timezone:  "Australia/Sydney",
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := store.SaveFreeWindowSettings(ctx, in); err != nil {
+		t.Fatalf("SaveFreeWindowSettings error: %v", err)
+	}
+
+	out, found, err := store.GetFreeWindowSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetFreeWindowSettings error: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+	if out.Enabled != in.Enabled || out.StartHour != in.StartHour || out.EndHour != in.EndHour || out.Timezone != in.Timezone {
+		t.Fatalf("out = %+v, want %+v", out, in)
+	}
+	if out.UpdatedAt.IsZero() {
+		t.Fatal("UpdatedAt is zero, want non-zero")
+	}
+}
+
+func Test_SaveFreeWindowSettings_upsert(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.SaveFreeWindowSettings(ctx, FreeWindowSettings{
+		Enabled:   false,
+		StartHour: 11,
+		EndHour:   14,
+		Timezone:  "Australia/Sydney",
+	}); err != nil {
+		t.Fatalf("first save error: %v", err)
+	}
+
+	if err := store.SaveFreeWindowSettings(ctx, FreeWindowSettings{
+		Enabled:   true,
+		StartHour: 9,
+		EndHour:   12,
+		Timezone:  "UTC",
+	}); err != nil {
+		t.Fatalf("second save error: %v", err)
+	}
+
+	out, found, err := store.GetFreeWindowSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetFreeWindowSettings error: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+	if !out.Enabled || out.StartHour != 9 || out.EndHour != 12 || out.Timezone != "UTC" {
+		t.Fatalf("out = %+v, want updated values", out)
+	}
+}

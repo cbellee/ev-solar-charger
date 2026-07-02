@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cbellee/ev-solar-charger/internal/config"
@@ -152,6 +153,13 @@ type modeRequest struct {
 	Mode string `json:"mode"`
 }
 
+type freeWindowRequest struct {
+	Enabled   bool   `json:"enabled"`
+	StartHour int    `json:"startHour"`
+	EndHour   int    `json:"endHour"`
+	Timezone  string `json:"timezone"`
+}
+
 type chargeLimitRequest struct {
 	Percent int `json:"percent"`
 }
@@ -210,6 +218,80 @@ func handleMode(ctrl *controller.Controller) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"result":"ok"}`))
+	}
+}
+
+func handleFreeWindowGet(ctrl *controller.Controller) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		settings := ctrl.GetFreeWindowSettings()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(settings)
+	}
+}
+
+func handleFreeWindowUpdate(ctrl *controller.Controller, store storage.Store) http.HandlerFunc {
+	var mu sync.Mutex
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireJSON(w, r) {
+			return
+		}
+
+		var req freeWindowRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		if req.StartHour < 0 || req.StartHour > 23 {
+			writeJSONError(w, http.StatusBadRequest, "startHour must be in [0,23]")
+			return
+		}
+		if req.EndHour < 1 || req.EndHour > 24 {
+			writeJSONError(w, http.StatusBadRequest, "endHour must be in [1,24]")
+			return
+		}
+		if req.EndHour <= req.StartHour {
+			writeJSONError(w, http.StatusBadRequest, "endHour must be greater than startHour")
+			return
+		}
+		if _, err := time.LoadLocation(req.Timezone); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "timezone must be a valid IANA timezone")
+			return
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		prev := ctrl.GetFreeWindowSettings()
+		if err := ctrl.SetFreeWindowSettings(controller.FreeWindowSettings{
+			Enabled:   req.Enabled,
+			StartHour: req.StartHour,
+			EndHour:   req.EndHour,
+			Timezone:  req.Timezone,
+		}); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if err := store.SaveFreeWindowSettings(r.Context(), storage.FreeWindowSettings{
+			Enabled:   req.Enabled,
+			StartHour: req.StartHour,
+			EndHour:   req.EndHour,
+			Timezone:  req.Timezone,
+			UpdatedAt: time.Now(),
+		}); err != nil {
+			_ = ctrl.SetFreeWindowSettings(controller.FreeWindowSettings{
+				Enabled:   prev.Enabled,
+				StartHour: prev.StartHour,
+				EndHour:   prev.EndHour,
+				Timezone:  prev.Timezone,
+			})
+			writeJSONError(w, http.StatusInternalServerError, "failed to save free window settings")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctrl.GetFreeWindowSettings())
 	}
 }
 

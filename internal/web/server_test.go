@@ -49,6 +49,18 @@ func Test_NewServer_requiresAuthForProtectedRoutes(t *testing.T) {
 	}
 }
 
+func Test_NewServer_requiresAuthForFreeWindowAPI(t *testing.T) {
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/free-window", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
 func Test_NewServer_allowsHealthzWithoutAuth(t *testing.T) {
 	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, denyAuth, oauthTestConfig())
 

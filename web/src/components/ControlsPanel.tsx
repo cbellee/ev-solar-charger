@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { Mode, StateSnapshot } from "@/api/types";
+import { COMMON_TIMEZONE_GROUPS, formatHour } from "@/lib/timezones";
 import { Card } from "./Card";
 import clsx from "clsx";
 
@@ -13,6 +14,33 @@ export function ControlsPanel({ snap }: Props) {
   const qc = useQueryClient();
   const [amps, setAmps] = useState<number>(snap.targetAmps || 16);
   const [error, setError] = useState<string | null>(null);
+  const [freeWindowEnabled, setFreeWindowEnabled] = useState<boolean>(snap.freeWindowEnabled);
+  const [freeWindowStartHour, setFreeWindowStartHour] = useState<number>(snap.freeWindowStartHour);
+  const [freeWindowEndHour, setFreeWindowEndHour] = useState<number>(snap.freeWindowEndHour);
+  const [freeWindowTimezone, setFreeWindowTimezone] = useState<string>(snap.freeWindowTimezone || "Australia/Sydney");
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+
+  const freeWindowQuery = useQuery({
+    queryKey: ["free-window"],
+    queryFn: api.getFreeWindow,
+    staleTime: Infinity,
+  });
+
+  useEffect(() => {
+    if (!freeWindowQuery.data) {
+      return;
+    }
+    setFreeWindowEnabled(freeWindowQuery.data.enabled);
+    setFreeWindowStartHour(freeWindowQuery.data.startHour);
+    setFreeWindowEndHour(freeWindowQuery.data.endHour);
+    setFreeWindowTimezone(freeWindowQuery.data.timezone);
+  }, [freeWindowQuery.data]);
+
+  useEffect(() => {
+    if (freeWindowEndHour <= freeWindowStartHour) {
+      setFreeWindowEndHour(Math.min(24, freeWindowStartHour + 1));
+    }
+  }, [freeWindowStartHour, freeWindowEndHour]);
 
   const setMode = useMutation({
     mutationFn: (mode: Mode) => api.setMode(mode),
@@ -39,8 +67,28 @@ export function ControlsPanel({ snap }: Props) {
     },
   });
 
+  const saveFreeWindow = useMutation({
+    mutationFn: () =>
+      api.setFreeWindow({
+        enabled: freeWindowEnabled,
+        startHour: freeWindowStartHour,
+        endHour: freeWindowEndHour,
+        timezone: freeWindowTimezone,
+      }),
+    onError: (e) => setSettingsError((e as Error).message),
+    onSuccess: () => {
+      setSettingsError(null);
+      qc.invalidateQueries({ queryKey: ["free-window"] });
+      qc.invalidateQueries({ queryKey: ["state"] });
+    },
+  });
+
   const isManual = snap.mode === "manual";
   const busy = setMode.isPending || control.isPending || refresh.isPending;
+  const settingsBusy = freeWindowQuery.isLoading || saveFreeWindow.isPending;
+  const endHourOptions = Array.from({ length: 24 - freeWindowStartHour }, (_, i) => freeWindowStartHour + 1 + i);
+  const settingsValidationError =
+    freeWindowEndHour <= freeWindowStartHour ? "End hour must be greater than start hour" : null;
 
   return (
     <Card title="Controls">
@@ -107,6 +155,87 @@ export function ControlsPanel({ snap }: Props) {
               </button>
             </div>
           </div>
+        </div>
+
+        <div className="border-t border-gray-800 pt-4 space-y-3">
+          <div className="text-xs text-gray-400">Free electricity window (auto mode)</div>
+
+          <label className="inline-flex items-center gap-2 text-sm text-gray-200">
+            <input
+              type="checkbox"
+              checked={freeWindowEnabled}
+              onChange={(e) => setFreeWindowEnabled(e.target.checked)}
+              disabled={settingsBusy}
+              className="accent-blue-500"
+            />
+            Enabled
+          </label>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label className="text-xs text-gray-400">
+              Start hour
+              <select
+                value={freeWindowStartHour}
+                onChange={(e) => setFreeWindowStartHour(Number(e.target.value))}
+                disabled={settingsBusy}
+                className="mt-1 w-full rounded bg-gray-900 border border-gray-700 px-2 py-1 text-sm text-gray-200"
+              >
+                {Array.from({ length: 24 }, (_, i) => i).map((hour) => (
+                  <option key={hour} value={hour}>
+                    {formatHour(hour)}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="text-xs text-gray-400">
+              End hour
+              <select
+                value={freeWindowEndHour}
+                onChange={(e) => setFreeWindowEndHour(Number(e.target.value))}
+                disabled={settingsBusy}
+                className="mt-1 w-full rounded bg-gray-900 border border-gray-700 px-2 py-1 text-sm text-gray-200"
+              >
+                  {endHourOptions.map((hour) => (
+                  <option key={hour} value={hour}>
+                    {formatHour(hour)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <label className="text-xs text-gray-400 block">
+            Timezone
+            <select
+              value={freeWindowTimezone}
+              onChange={(e) => setFreeWindowTimezone(e.target.value)}
+              disabled={settingsBusy}
+              className="mt-1 w-full rounded bg-gray-900 border border-gray-700 px-2 py-1 text-sm text-gray-200"
+            >
+              {COMMON_TIMEZONE_GROUPS.map((group) => (
+                <optgroup key={group.region} label={group.region}>
+                  {group.zones.map((zone) => (
+                    <option key={zone} value={zone}>
+                      {zone}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+
+          <button
+            type="button"
+            className="rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-3 py-1.5 text-sm font-medium"
+            disabled={settingsBusy || Boolean(settingsValidationError)}
+            onClick={() => saveFreeWindow.mutate()}
+          >
+            {saveFreeWindow.isPending ? "Saving window…" : "Save free window"}
+          </button>
+
+          {settingsValidationError && <p className="text-xs text-red-400">{settingsValidationError}</p>}
+          {settingsError && <p className="text-xs text-red-400">{settingsError}</p>}
         </div>
 
         {error && <p className="text-xs text-red-400">{error}</p>}

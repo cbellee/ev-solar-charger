@@ -50,6 +50,15 @@ type APIUsageSnapshot struct {
 	EstimatedCost float64
 }
 
+// FreeWindowSettings stores runtime-configurable free-window schedule values.
+type FreeWindowSettings struct {
+	Enabled   bool
+	StartHour int
+	EndHour   int
+	Timezone  string
+	UpdatedAt time.Time
+}
+
 // ReadingFilter for querying historical readings.
 type ReadingFilter struct {
 	From     time.Time
@@ -72,6 +81,8 @@ type Store interface {
 	Search(ctx context.Context, query string, from, to time.Time, limit int) ([]Event, error)
 	InsertAPIUsage(ctx context.Context, s APIUsageSnapshot) error
 	QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]APIUsageSnapshot, error)
+	GetFreeWindowSettings(ctx context.Context) (FreeWindowSettings, bool, error)
+	SaveFreeWindowSettings(ctx context.Context, s FreeWindowSettings) error
 	Prune(ctx context.Context, olderThan time.Duration) (int64, error)
 	Close() error
 }

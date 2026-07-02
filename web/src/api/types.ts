@@ -23,6 +23,11 @@ export interface StateSnapshot {
   state: ControllerState;
   mode: Mode;
   testMode: boolean;
+  freeWindowEnabled: boolean;
+  freeWindowStartHour: number;
+  freeWindowEndHour: number;
+  freeWindowTimezone: string;
+  freeWindowActive: boolean;
   pvWatts: number;
   gridWatts: number;
   loadWatts: number;
@@ -41,6 +46,14 @@ export interface StateSnapshot {
   consecutiveSurplus: number;
   lastUpdate: string;
   lastError: string;
+}
+
+export interface FreeWindowSettings {
+  enabled: boolean;
+  startHour: number;
+  endHour: number;
+  timezone: string;
+  active: boolean;
 }
 
 export interface Reading {

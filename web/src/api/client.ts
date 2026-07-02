@@ -4,6 +4,7 @@ import type {
   ChargeSession,
   ControlAction,
   EventRecord,
+  FreeWindowSettings,
   HistoryQuery,
   Mode,
   Reading,
@@ -125,6 +126,17 @@ export const api = {
     return jsonFetch("/api/charge-limit", {
       method: "POST",
       body: JSON.stringify({ percent }),
+    });
+  },
+
+  getFreeWindow(): Promise<FreeWindowSettings> {
+    return jsonFetch<FreeWindowSettings>("/api/free-window");
+  },
+
+  setFreeWindow(settings: Omit<FreeWindowSettings, "active">): Promise<FreeWindowSettings> {
+    return jsonFetch<FreeWindowSettings>("/api/free-window", {
+      method: "POST",
+      body: JSON.stringify(settings),
     });
   },
 

@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS api_usage_snapshots (
     estimated_cost  REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_api_usage_timestamp ON api_usage_snapshots(timestamp);
+
+CREATE TABLE IF NOT EXISTS free_window_settings (
+	id          INTEGER PRIMARY KEY CHECK (id = 1),
+	enabled     INTEGER NOT NULL DEFAULT 0,
+	start_hour  INTEGER NOT NULL,
+	end_hour    INTEGER NOT NULL,
+	timezone    TEXT NOT NULL,
+	updated_at  DATETIME NOT NULL
+);
 `
 	_, err := s.db.ExecContext(ctx, ddl)
 	if err != nil {
@@ -393,6 +402,58 @@ func (s *SQLiteStore) QueryAPIUsage(ctx context.Context, from, to time.Time, lim
 		snapshots = []APIUsageSnapshot{}
 	}
 	return snapshots, rows.Err()
+}
+
+// GetFreeWindowSettings returns the persisted free-window settings if available.
+func (s *SQLiteStore) GetFreeWindowSettings(ctx context.Context) (FreeWindowSettings, bool, error) {
+	var settings FreeWindowSettings
+	var enabled int
+	var updatedAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT enabled, start_hour, end_hour, timezone, updated_at
+		 FROM free_window_settings
+		 WHERE id = 1`).
+		Scan(&enabled, &settings.StartHour, &settings.EndHour, &settings.Timezone, &updatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return FreeWindowSettings{}, false, nil
+		}
+		return FreeWindowSettings{}, false, fmt.Errorf("storage: get free window settings: %w", err)
+	}
+	settings.Enabled = enabled != 0
+	settings.UpdatedAt = parseStoredTime(updatedAt)
+	return settings, true, nil
+}
+
+// SaveFreeWindowSettings upserts persisted free-window settings.
+func (s *SQLiteStore) SaveFreeWindowSettings(ctx context.Context, settings FreeWindowSettings) error {
+	enabled := 0
+	if settings.Enabled {
+		enabled = 1
+	}
+	if settings.UpdatedAt.IsZero() {
+		settings.UpdatedAt = time.Now().UTC()
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO free_window_settings (id, enabled, start_hour, end_hour, timezone, updated_at)
+		 VALUES (1, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   enabled=excluded.enabled,
+		   start_hour=excluded.start_hour,
+		   end_hour=excluded.end_hour,
+		   timezone=excluded.timezone,
+		   updated_at=excluded.updated_at`,
+		enabled,
+		settings.StartHour,
+		settings.EndHour,
+		settings.Timezone,
+		settings.UpdatedAt.UTC().Format("2006-01-02 15:04:05"),
+	)
+	if err != nil {
+		return fmt.Errorf("storage: save free window settings: %w", err)
+	}
+	return nil
 }
 
 // Prune deletes records older than the specified duration and returns the total rows deleted.

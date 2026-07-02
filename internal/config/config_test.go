@@ -137,6 +137,18 @@ func Test_Load_defaultsApplied(t *testing.T) {
 	if cfg.TeslaIdlePollInterval != 1800*time.Second {
 		t.Errorf("TeslaIdlePollInterval = %v, want 1800s", cfg.TeslaIdlePollInterval)
 	}
+	if cfg.FreeWindowEnabled {
+		t.Fatal("FreeWindowEnabled = true, want false")
+	}
+	if cfg.FreeWindowStartHour != 11 {
+		t.Errorf("FreeWindowStartHour = %d, want 11", cfg.FreeWindowStartHour)
+	}
+	if cfg.FreeWindowEndHour != 14 {
+		t.Errorf("FreeWindowEndHour = %d, want 14", cfg.FreeWindowEndHour)
+	}
+	if cfg.FreeWindowTimezone == nil || cfg.FreeWindowTimezone.String() != "Australia/Sydney" {
+		t.Fatalf("FreeWindowTimezone = %v, want Australia/Sydney", cfg.FreeWindowTimezone)
+	}
 	if cfg.AmpsChangeThreshold != 2 {
 		t.Errorf("AmpsChangeThreshold = %d, want 2", cfg.AmpsChangeThreshold)
 	}
@@ -405,5 +417,26 @@ func Test_Load_tlsEnabledWithDomain(t *testing.T) {
 	}
 	if cfg.TLSDomain != "tesla.bellee.net" {
 		t.Fatalf("TLSDomain = %q, want %q", cfg.TLSDomain, "tesla.bellee.net")
+	}
+}
+
+func Test_Load_invalidFreeWindowHours(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FREE_WINDOW_START_HOUR", "15")
+	t.Setenv("FREE_WINDOW_END_HOUR", "14")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for FREE_WINDOW_END_HOUR <= FREE_WINDOW_START_HOUR")
+	}
+}
+
+func Test_Load_invalidFreeWindowTimezone(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FREE_WINDOW_TIMEZONE", "Mars/OlympusMons")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid FREE_WINDOW_TIMEZONE")
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,14 +20,19 @@ import (
 )
 
 type recordingStore struct {
+	mu            sync.Mutex
 	readings      []storage.Reading
 	sessions      []storage.ChargeSession
 	events        []storage.Event
+	freeWindow    storage.FreeWindowSettings
+	freeWindowSet bool
+	saveHook      func(storage.FreeWindowSettings) error
 	readingFilter storage.ReadingFilter
 	readingsErr   error
 	sessionsErr   error
 	eventsErr     error
 	searchErr     error
+	freeWindowErr error
 	searchQuery   string
 	searchLimit   int
 }
@@ -59,6 +66,34 @@ func (s *recordingStore) InsertAPIUsage(ctx context.Context, snap storage.APIUsa
 }
 func (s *recordingStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
 	return []storage.APIUsageSnapshot{}, nil
+}
+func (s *recordingStore) GetFreeWindowSettings(ctx context.Context) (storage.FreeWindowSettings, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.freeWindowErr != nil {
+		return storage.FreeWindowSettings{}, false, s.freeWindowErr
+	}
+	return s.freeWindow, s.freeWindowSet, nil
+}
+func (s *recordingStore) SaveFreeWindowSettings(ctx context.Context, fw storage.FreeWindowSettings) error {
+	s.mu.Lock()
+	saveHook := s.saveHook
+	err := s.freeWindowErr
+	s.mu.Unlock()
+
+	if saveHook != nil {
+		if err := saveHook(fw); err != nil {
+			return err
+		}
+	}
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.freeWindow = fw
+	s.freeWindowSet = true
+	s.mu.Unlock()
+	return nil
 }
 func (s *recordingStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) {
 	return 0, nil
@@ -299,6 +334,183 @@ func Test_handleMode_invalid(t *testing.T) {
 	}
 }
 
+func Test_handleFreeWindowGet_returnsSettings(t *testing.T) {
+	ctrl := newTestCtrl(t)
+	if err := ctrl.SetFreeWindowSettings(controller.FreeWindowSettings{
+		Enabled:   true,
+		StartHour: 11,
+		EndHour:   14,
+		Timezone:  "Australia/Sydney",
+	}); err != nil {
+		t.Fatalf("SetFreeWindowSettings error: %v", err)
+	}
+
+	handler := handleFreeWindowGet(ctrl)
+	req := httptest.NewRequest(http.MethodGet, "/api/free-window", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var got controller.FreeWindowSettings
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !got.Enabled || got.StartHour != 11 || got.EndHour != 14 || got.Timezone != "Australia/Sydney" {
+		t.Fatalf("got = %+v, want enabled=true start=11 end=14 timezone=Australia/Sydney", got)
+	}
+}
+
+func Test_handleFreeWindowUpdate_success(t *testing.T) {
+	ctrl := newTestCtrl(t)
+	store := &recordingStore{}
+	handler := handleFreeWindowUpdate(ctrl, store)
+
+	body := strings.NewReader(`{"enabled":true,"startHour":10,"endHour":13,"timezone":"UTC"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/free-window", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !store.freeWindowSet {
+		t.Fatal("expected free-window settings to be persisted")
+	}
+	if !store.freeWindow.Enabled || store.freeWindow.StartHour != 10 || store.freeWindow.EndHour != 13 || store.freeWindow.Timezone != "UTC" {
+		t.Fatalf("persisted settings = %+v, want enabled=true start=10 end=13 timezone=UTC", store.freeWindow)
+	}
+
+	got := ctrl.GetFreeWindowSettings()
+	if !got.Enabled || got.StartHour != 10 || got.EndHour != 13 || got.Timezone != "UTC" {
+		t.Fatalf("controller settings = %+v, want enabled=true start=10 end=13 timezone=UTC", got)
+	}
+}
+
+func Test_handleFreeWindowUpdate_invalidTimezone(t *testing.T) {
+	ctrl := newTestCtrl(t)
+	handler := handleFreeWindowUpdate(ctrl, &recordingStore{})
+
+	body := strings.NewReader(`{"enabled":true,"startHour":11,"endHour":14,"timezone":"Bad/Timezone"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/free-window", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func Test_handleFreeWindowUpdate_storeError(t *testing.T) {
+	ctrl := newTestCtrl(t)
+	if err := ctrl.SetFreeWindowSettings(controller.FreeWindowSettings{
+		Enabled:   true,
+		StartHour: 11,
+		EndHour:   14,
+		Timezone:  "Australia/Sydney",
+	}); err != nil {
+		t.Fatalf("SetFreeWindowSettings error: %v", err)
+	}
+	store := &recordingStore{freeWindowErr: errors.New("save failed")}
+	handler := handleFreeWindowUpdate(ctrl, store)
+
+	body := strings.NewReader(`{"enabled":true,"startHour":11,"endHour":14,"timezone":"UTC"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/free-window", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+
+	got := ctrl.GetFreeWindowSettings()
+	if !got.Enabled || got.StartHour != 11 || got.EndHour != 14 || got.Timezone != "Australia/Sydney" {
+		t.Fatalf("controller settings changed on store error: %+v", got)
+	}
+}
+
+func Test_handleFreeWindowUpdate_concurrentInterleavingKeepsRuntimeAndStoreConsistent(t *testing.T) {
+	ctrl := newTestCtrl(t)
+	if err := ctrl.SetFreeWindowSettings(controller.FreeWindowSettings{
+		Enabled:   true,
+		StartHour: 11,
+		EndHour:   14,
+		Timezone:  "Australia/Sydney",
+	}); err != nil {
+		t.Fatalf("SetFreeWindowSettings error: %v", err)
+	}
+
+	firstEntered := make(chan struct{})
+	unblockFirst := make(chan struct{})
+	var saveCalls atomic.Int32
+
+	store := &recordingStore{}
+	store.saveHook = func(fw storage.FreeWindowSettings) error {
+		if saveCalls.Add(1) == 1 {
+			close(firstEntered)
+			<-unblockFirst
+			return errors.New("first save failed")
+		}
+		return nil
+	}
+
+	handler := handleFreeWindowUpdate(ctrl, store)
+
+	var wg sync.WaitGroup
+	w1 := httptest.NewRecorder()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		body := strings.NewReader(`{"enabled":true,"startHour":10,"endHour":13,"timezone":"UTC"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/free-window", body)
+		req.Header.Set("Content-Type", "application/json")
+		handler(w1, req)
+	}()
+
+	<-firstEntered
+
+	w2 := httptest.NewRecorder()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		body := strings.NewReader(`{"enabled":true,"startHour":9,"endHour":12,"timezone":"Europe/London"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/free-window", body)
+		req.Header.Set("Content-Type", "application/json")
+		handler(w2, req)
+	}()
+
+	close(unblockFirst)
+	wg.Wait()
+
+	if w1.Code != http.StatusInternalServerError {
+		t.Fatalf("first status = %d, want 500", w1.Code)
+	}
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", w2.Code)
+	}
+
+	got := ctrl.GetFreeWindowSettings()
+	if !got.Enabled || got.StartHour != 9 || got.EndHour != 12 || got.Timezone != "Europe/London" {
+		t.Fatalf("controller settings = %+v, want enabled=true start=9 end=12 timezone=Europe/London", got)
+	}
+
+	store.mu.Lock()
+	persisted := store.freeWindow
+	persistedSet := store.freeWindowSet
+	store.mu.Unlock()
+	if !persistedSet {
+		t.Fatal("expected persisted free-window settings to be set")
+	}
+	if !persisted.Enabled || persisted.StartHour != 9 || persisted.EndHour != 12 || persisted.Timezone != "Europe/London" {
+		t.Fatalf("persisted settings = %+v, want enabled=true start=9 end=12 timezone=Europe/London", persisted)
+	}
+}
+
 func Test_handleHealthz(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -528,6 +740,12 @@ func (s *nullStore) InsertAPIUsage(ctx context.Context, snap storage.APIUsageSna
 }
 func (s *nullStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
 	return []storage.APIUsageSnapshot{}, nil
+}
+func (s *nullStore) GetFreeWindowSettings(ctx context.Context) (storage.FreeWindowSettings, bool, error) {
+	return storage.FreeWindowSettings{}, false, nil
+}
+func (s *nullStore) SaveFreeWindowSettings(ctx context.Context, fw storage.FreeWindowSettings) error {
+	return nil
 }
 func (s *nullStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (s *nullStore) Close() error                                                      { return nil }

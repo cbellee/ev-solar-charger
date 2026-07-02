@@ -42,12 +42,21 @@ export default function DashboardPage() {
 }
 
 function StatusFooter({ snap }: { snap: StateSnapshot }) {
+  const freeWindowLabel = snap.freeWindowEnabled
+    ? `${String(snap.freeWindowStartHour).padStart(2, "0")}:00-${String(snap.freeWindowEndHour).padStart(2, "0")}:00 ${snap.freeWindowTimezone}`
+    : "off";
+
   return (
     <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
       <Stat label="State" value={snap.state} className={clsx("uppercase tracking-wide rounded px-2 py-0.5 inline-block", STATE_BG[snap.state])} />
       <Stat label="Mode" value={snap.mode} />
       <Stat label="Vehicle" value={snap.carPluggedIn ? (snap.carOnline ? "online" : "offline") : "unplugged"} />
       <Stat label="Last update" value={formatTime(snap.lastUpdate)} />
+      <Stat
+        label="Free window"
+        value={freeWindowLabel}
+        className={snap.freeWindowEnabled ? (snap.freeWindowActive ? "text-green-300" : "text-yellow-300") : undefined}
+      />
       {snap.lastError && (
         <div className="col-span-full rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-300">
           <span className="font-medium">Error:</span> {snap.lastError}

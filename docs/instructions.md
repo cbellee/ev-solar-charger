@@ -261,6 +261,10 @@ MAX_CHARGE_AMPS=32
 LINE_VOLTAGE=240
 DEADBAND_POLLS=3
 WAKE_THRESHOLD_POLLS=6
+FREE_WINDOW_ENABLED=false
+FREE_WINDOW_START_HOUR=11
+FREE_WINDOW_END_HOUR=14
+FREE_WINDOW_TIMEZONE=Australia/Sydney
 
 # --- Web (auth via Entra ID) ---
 ENTRA_TENANT_ID=<your tenant GUID>
@@ -737,6 +741,10 @@ All configuration is via environment variables:
 | `WAKE_THRESHOLD_POLLS` | No | `6` | Consecutive surplus ticks before waking car |
 | `WAKE_MIN_AMPS_MARGIN` | No | `2` | Extra amps above `MIN_CHARGE_AMPS` required to initiate a wake (avoids transient-surplus wakes) |
 | `WAKE_AFTER_NON_ACTIONABLE_BACKOFF_SECONDS` | No | `1800` | Suppress wakes for this many seconds after observing the car in a non-actionable state (Disconnected, Complete) |
+| `FREE_WINDOW_ENABLED` | No | `false` | Enables time-window override that removes solar-only charging cap during configured hours |
+| `FREE_WINDOW_START_HOUR` | No | `11` | Start hour for free-window override (0-23, local to `FREE_WINDOW_TIMEZONE`) |
+| `FREE_WINDOW_END_HOUR` | No | `14` | End hour for free-window override (1-24, must be greater than start hour) |
+| `FREE_WINDOW_TIMEZONE` | No | `Australia/Sydney` | IANA timezone used for free-window schedule |
 | `TESLA_CHARGING_POLL_SECONDS` | No | `300` | Seconds between Tesla API polls while charging |
 | `TESLA_IDLE_POLL_SECONDS` | No | `1800` | Seconds between Tesla API polls while idle or monitoring |
 | `AMPS_CHANGE_THRESHOLD` | No | `2` | Minimum amp change to send a `SetChargingAmps` command |
@@ -754,6 +762,8 @@ All configuration is via environment variables:
 | `OTEL_TRACES_EXPORTER` | No | `none` | Set to `otlp` and configure `OTEL_EXPORTER_OTLP_ENDPOINT` to ship traces |
 | `OTEL_METRICS_EXPORTER` | No | `none` | Set to `otlp` to ship metrics |
 | `OTEL_LOGS_EXPORTER` | No | `none` | Set to `otlp` to ship logs |
+
+The dashboard "Controls" panel allows editing the free window (enabled/start/end/timezone) at runtime. Saved values are persisted in SQLite and override environment defaults until changed again.
 
 ---
 
