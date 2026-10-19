@@ -171,12 +171,14 @@ or the module's certificate. Leave the pin empty to use normal system CA and
 hostname verification for a properly issued certificate.
 
 Recreate the application container after environment changes (a restart alone
-does not reload Compose environment values):
+does not reload Compose environment values). For a local source build:
 
 ```bash
 docker compose up -d --no-deps --force-recreate solar-ev-charger
-# Older Synology installations use docker-compose instead of docker compose.
 ```
+
+For GHCR deployments, use both Compose files and `--no-build` as shown in
+[Synology NAS updates](#synology-nas-updates).
 
 The client logs in before discovering devices and reauthenticates once if a
 register request reports an expired/unauthorized session. Initial connection
@@ -189,6 +191,91 @@ overrides this header, disable buffering for `/events` and set its read timeout
 above 15 seconds. Inverter read failures are published as error snapshots; the
 last successful reading timestamp is preserved rather than presenting stale
 values as fresh data.
+
+#### Why authentication and TLS changes were necessary
+
+After a WiNet-S firmware upgrade, the deployed controller could no longer read
+the inverter. The investigation established three separate compatibility
+problems:
+
+| Layer | Previous client behavior | Observed module behavior |
+|---|---|---|
+| Transport | Plain HTTP register reads on port 80 and `ws://` on port 8082 | Both ports refused connections; HTTPS and `wss://` worked on port 443 |
+| Authentication | `connect` returned an anonymous token, then the client immediately requested `devicelist` | Anonymous `connect` still succeeded, but `devicelist` returned protocol result code 401; discovery and register reads succeeded after local login |
+| Certificate trust | No TLS verification was needed for the old plaintext connection | The factory certificate was not trusted by the browser or normal system CA verification |
+
+These were local WiNet-S issues, not expired Tesla OAuth credentials. Signing
+into Tesla again could not fix them. The exact installed firmware version was
+not confirmed, so these findings describe the tested device rather than a
+guarantee about every WiNet-S firmware release.
+
+Changing `SUNGROW_PORT` alone was insufficient: the original client hard-coded
+`http://` for register reads and `ws://` for the session connection, and did not
+send a local login request. Accepting a browser certificate warning also does
+not configure trust inside the Go application or Docker container.
+
+#### What changed in the code
+
+- **Configuration and startup:** [config.go](internal/config/config.go) loads
+  `SUNGROW_TLS`, the local credentials or password file, and the certificate
+  fingerprint. TLS defaults to port 443 when no port is explicitly configured.
+  It rejects incomplete credential pairs, conflicting password sources, and
+  credentials configured without TLS.
+  [main.go](cmd/server/main.go) passes this configuration to
+  `inverter.NewConfigured` and reports invalid client configuration at startup.
+- **Secure session establishment:** [sungrow.go](internal/inverter/sungrow.go)
+  selects WSS/HTTPS in TLS mode and performs
+  `connect -> login -> devicelist -> register reads`. The login message uses
+  `username` and `passwd`; the returned authenticated token replaces the
+  anonymous token for discovery and reads. The handshake/session setup is
+  bounded by a context timeout. Legacy anonymous WS/HTTP remains available
+  when TLS is disabled.
+- **Explicit certificate trust:** the inverter's HTTP transport uses TLS 1.2 or
+  newer. Without a pin, Go performs normal CA and hostname verification. With
+  `SUNGROW_CERT_SHA256`, a custom `VerifyConnection` callback checks the exact
+  leaf-certificate SHA-256 fingerprint and its validity dates. In that mode,
+  `InsecureSkipVerify` disables only the built-in PKI/hostname check so the
+  custom verifier can support the factory certificate; it is **not** an
+  unconditional acceptance of arbitrary certificates. This is scoped to the
+  inverter client, not a global TLS bypass. Redirects are refused, and no
+  certificate was imported into the module.
+- **Recovery and secret handling:** an HTTP 401 or protocol result code 106/401
+  triggers one reconnect/login and retry of the failed register read. A client
+  without an established session retries connection on a later poll. HTTP
+  transport errors are unwrapped before logging so the request URL's session
+  token is not included in the error. Real credentials are supplied at
+  deployment time, never embedded in source or committed test fixtures.
+- **Dashboard resilience:** [sse.go](internal/web/sse.go) writes and flushes an
+  initial comment immediately, then sends a heartbeat every 15 seconds.
+  Previously it sent nothing until a successful controller update, leaving
+  nginx able to time out an idle connection. It also sets
+  `X-Accel-Buffering: no` and handles stream write failures.
+  [controller.go](internal/controller/controller.go) now publishes inverter
+  failure snapshots with `state=error`, `lastError`, and a zero target-current
+  value while preserving the last successful reading timestamp. That target
+  value is UI state, not a new vehicle stop command; charging policy was not
+  changed.
+
+The idle-stream behavior was consistent with the reported SSE 504, although the
+original nginx timeout was not independently confirmed from its logs. The
+changes address both the demonstrated inverter connection failure and the
+stream's demonstrated lack of idle output.
+
+#### Verification
+
+Regression tests cover authenticated TLS reads, certificate mismatch/untrusted
+certificates and validity dates, rejected login, session-expiry recovery,
+legacy connections, token redaction, idle SSE frames, and published inverter
+errors with recovery. The affected Go packages passed race-enabled tests,
+`go vet`, and a build; CI also passed the full test suite and container build.
+
+An opt-in, read-only `TestLiveWiNetTLS` hardware check in
+[secure_test.go](internal/inverter/secure_test.go) successfully used the new Go
+client to authenticate, discover the inverter, and read the existing power
+registers 5031, 5083 and 5091. The register API and addresses did not need to be
+replaced. No module settings or vehicle commands were changed during this
+check. After deploying the new image and configuration, the operator confirmed
+normal application operation.
 
 ## Build and Publish Container to GHCR
 
@@ -220,6 +307,73 @@ Start with base and override compose files:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --pull always --no-build
 ```
+
+### Synology NAS updates
+
+Older Synology installations use the standalone `docker-compose` command rather
+than `docker compose`. Run these commands over SSH on the NAS, from the
+deployment directory (for example `/volume1/docker/solar-ev-charger`).
+
+The deployment's `.env` is a hidden file; `ls -la` displays it. Edit the NAS copy,
+not just the copy on your development Mac. Keep existing Tesla and Entra
+settings, and add the WiNet-S settings described above. Never share the complete
+file or commit credentials.
+
+For password-file authentication, create `secrets/winet-password` if it does not
+already exist:
+
+```bash
+mkdir -p secrets
+(umask 077; cat > secrets/winet-password)
+```
+
+Type only the local WiNet-S password, press Enter, then Ctrl+D. This avoids
+placing the password in shell history. Set
+`SUNGROW_PASSWORD_FILE=/secrets/winet-password` and leave `SUNGROW_PASSWORD`
+unset. The existing volume mount exposes this file inside the container; ensure
+the container's runtime user can read it without making it world-readable.
+
+Check the image in `docker-compose.ghcr.yml`:
+
+```yaml
+services:
+  solar-ev-charger:
+    image: ghcr.io/cbellee/ev-solar-charger:latest
+```
+
+An old `sha-...` tag remains pinned to that build. Use `latest` to pull the latest
+successful main-branch publication, or explicitly select a published SHA tag
+for a reproducible deployment. Note the previous tag or image ID for rollback.
+Wait for the main-branch image-publishing workflow to succeed before pulling.
+
+Download the image and recreate only the application container:
+
+```bash
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml \
+  pull solar-ev-charger &&
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml \
+  up -d --no-deps --no-build --force-recreate solar-ev-charger
+```
+
+This leaves the Tesla proxy and persistent data volume in place. The `latest`
+tag does not automatically update running containers.
+
+If only `.env` changed and the desired image is already present, skip the pull
+and run just the `up` command above. **Restarting the existing container does not
+reload environment variables; recreating it does.** No `down` or volume deletion
+is needed.
+
+Check startup and refresh the dashboard:
+
+```bash
+sudo docker-compose -f docker-compose.yml -f docker-compose.ghcr.yml \
+  logs --since 5m --tail 100 solar-ev-charger
+```
+
+Look for `sungrow: connected`, check for subsequent read errors, and confirm that
+the dashboard's last-update timestamp advances and its stream error clears.
+A healthy HTTP endpoint alone does not prove inverter reads are working.
+Redact session tokens, passwords and vehicle identifiers before sharing logs.
 
 ## Public HTTPS for Tesla OAuth
 
