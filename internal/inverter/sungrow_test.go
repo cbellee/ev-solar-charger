@@ -282,14 +282,14 @@ func Test_GetPowerData_malformedJSON(t *testing.T) {
 	}
 }
 
-func Test_GetPowerData_notConnected(t *testing.T) {
+func Test_GetPowerData_retriesInitialConnection(t *testing.T) {
 	client := New("127.0.0.1", 0, nil, nil)
 	_, err := client.GetPowerData(context.Background())
 	if err == nil {
 		t.Fatal("expected error when not connected")
 	}
-	if !strings.Contains(err.Error(), "not connected") {
-		t.Fatalf("expected 'not connected' error, got %v", err)
+	if !strings.Contains(err.Error(), "sungrow: connect:") {
+		t.Fatalf("expected an attempted connection, got %v", err)
 	}
 }
 

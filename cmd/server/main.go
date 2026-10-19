@@ -36,7 +36,7 @@ type runtimeDeps struct {
 	newLogger        func(string, slog.Level) *slog.Logger
 	newMetrics       func() (*observability.Metrics, error)
 	newStore         func(string, *slog.Logger) (storage.Store, error)
-	newInverter      func(string, int, *slog.Logger, *observability.Metrics) inverter.InverterReader
+	newInverter      func(config.Config, *slog.Logger, *observability.Metrics) (inverter.InverterReader, error)
 	newVehicle       func(config.Config, *slog.Logger, *observability.Metrics) (tesla.VehicleController, error)
 	newServer        func(*controller.Controller, storage.Store, *web.Hub, *slog.Logger, web.Authenticator, config.Config) http.Handler
 	newHub           func(*slog.Logger) *web.Hub
@@ -52,8 +52,8 @@ func defaultRuntimeDeps() runtimeDeps {
 		newStore: func(dbPath string, logger *slog.Logger) (storage.Store, error) {
 			return storage.NewSQLiteStore(dbPath, logger)
 		},
-		newInverter: func(host string, port int, logger *slog.Logger, metrics *observability.Metrics) inverter.InverterReader {
-			return inverter.New(host, port, logger, metrics)
+		newInverter: func(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) (inverter.InverterReader, error) {
+			return inverter.NewConfigured(cfg, logger, metrics)
 		},
 		newVehicle: func(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) (tesla.VehicleController, error) {
 			return tesla.New(cfg, logger, metrics)
@@ -168,7 +168,10 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	defer store.Close()
 
 	// 6. Create inverter client.
-	inv := deps.newInverter(cfg.SungrowHost, cfg.SungrowPort, logger, metrics)
+	inv, err := deps.newInverter(cfg, logger, metrics)
+	if err != nil {
+		return fmt.Errorf("failed to create inverter client: %w", err)
+	}
 	defer func() {
 		if inv == nil {
 			return

@@ -17,6 +17,32 @@ import (
 	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
 
+func TestInverterFailurePublishesErrorAndRecovers(t *testing.T) {
+	inv := &mockInverter{power: inverter.PowerData{PVWatts: 5000}}
+	ctrl := newTestController(inv, &mockVehicle{}, &mockStore{})
+	ctrl.Tick(context.Background())
+	lastGood := ctrl.GetStateSnapshot()
+	var updates []StateSnapshot
+	ctrl.OnUpdate = func(s StateSnapshot) { updates = append(updates, s) }
+	inv.err = errors.New("inverter unavailable")
+	for range 2 {
+		ctrl.Tick(context.Background())
+	}
+	if len(updates) != 2 {
+		t.Fatalf("error updates = %d, want 2", len(updates))
+	}
+	for _, snap := range updates {
+		if snap.State != StateError || snap.LastError != "inverter unavailable" || !snap.LastUpdate.Equal(lastGood.LastUpdate) {
+			t.Fatalf("error must preserve last successful reading time: %+v", snap)
+		}
+	}
+	inv.err = nil
+	ctrl.Tick(context.Background())
+	if ctrl.GetStateSnapshot().LastError != "" {
+		t.Fatal("recovered reading must clear the displayed error")
+	}
+}
+
 // mockInverter implements inverter.InverterReader.
 type mockInverter struct {
 	power inverter.PowerData

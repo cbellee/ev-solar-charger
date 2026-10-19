@@ -173,6 +173,14 @@ func (c *Controller) Tick(ctx context.Context) {
 	if err != nil {
 		c.logger.ErrorContext(ctx, "inverter read failed", "error", err)
 		c.transitionTo(ctx, StateError, err.Error())
+		c.mu.Lock()
+		c.snapshot.State = StateError
+		c.snapshot.LastError = err.Error()
+		c.snapshot.TargetAmps = 0
+		c.mu.Unlock()
+		if c.OnUpdate != nil {
+			c.OnUpdate(c.GetStateSnapshot())
+		}
 		return
 	}
 
