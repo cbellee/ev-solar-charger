@@ -2,9 +2,71 @@ package config
 
 import (
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestSungrowConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		bad  bool
+		port int
+	}{
+		{name: "legacy defaults", port: 8082},
+		{name: "secure defaults", env: map[string]string{"SUNGROW_TLS": "true"}, port: 443},
+		{name: "secure custom port", env: map[string]string{"SUNGROW_TLS": "true", "SUNGROW_PORT": "8443"}, port: 8443},
+		{name: "invalid TLS", env: map[string]string{"SUNGROW_TLS": "invalid"}, bad: true},
+		{name: "password without user", env: map[string]string{"SUNGROW_TLS": "true", "SUNGROW_PASSWORD": "secret"}, bad: true},
+		{name: "user without password", env: map[string]string{"SUNGROW_TLS": "true", "SUNGROW_USERNAME": "admin"}, bad: true},
+		{name: "cleartext credentials", env: map[string]string{"SUNGROW_USERNAME": "admin", "SUNGROW_PASSWORD": "secret"}, bad: true},
+		{name: "cleartext pin", env: map[string]string{"SUNGROW_CERT_SHA256": "fingerprint"}, bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			for _, key := range []string{"SUNGROW_TLS", "SUNGROW_PORT", "SUNGROW_USERNAME", "SUNGROW_PASSWORD", "SUNGROW_PASSWORD_FILE", "SUNGROW_CERT_SHA256"} {
+				t.Setenv(key, "")
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if (err != nil) != tc.bad {
+				t.Fatalf("Load error = %v, want error %v", err, tc.bad)
+			}
+			if err == nil && cfg.SungrowPort != tc.port {
+				t.Fatalf("port = %d, want %d", cfg.SungrowPort, tc.port)
+			}
+		})
+	}
+}
+
+func TestSungrowPasswordFile(t *testing.T) {
+	setRequiredEnv(t)
+	path := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(path, []byte("test-secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUNGROW_TLS", "true")
+	t.Setenv("SUNGROW_USERNAME", "admin")
+	t.Setenv("SUNGROW_PASSWORD", "")
+	t.Setenv("SUNGROW_PASSWORD_FILE", path)
+	cfg, err := Load()
+	if err != nil || cfg.SungrowPassword != "test-secret" {
+		t.Fatalf("password file not loaded correctly: %v", err)
+	}
+	t.Setenv("SUNGROW_PASSWORD", "conflicting-secret")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected conflicting password sources to fail")
+	}
+	t.Setenv("SUNGROW_PASSWORD", "")
+	t.Setenv("SUNGROW_PASSWORD_FILE", path+"-missing")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected missing password file to fail")
+	}
+}
 
 func setRequiredEnv(t *testing.T) {
 	t.Helper()

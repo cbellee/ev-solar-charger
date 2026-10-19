@@ -116,8 +116,8 @@ func testDeps(cfg config.Config) runtimeDeps {
 		newLogger:  func(name string, level slog.Level) *slog.Logger { return testLogger() },
 		newMetrics: func() (*observability.Metrics, error) { return nil, nil },
 		newStore:   func(dbPath string, logger *slog.Logger) (storage.Store, error) { return fakeStore{}, nil },
-		newInverter: func(host string, port int, logger *slog.Logger, metrics *observability.Metrics) inverter.InverterReader {
-			return &fakeInverter{}
+		newInverter: func(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) (inverter.InverterReader, error) {
+			return &fakeInverter{}, nil
 		},
 		newVehicle: func(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) (tesla.VehicleController, error) {
 			return fakeVehicle{}, nil
@@ -127,6 +127,21 @@ func testDeps(cfg config.Config) runtimeDeps {
 		newAuthenticator: func(_ context.Context, _ web.EntraConfig) (web.Authenticator, error) {
 			return web.NoopAuthenticator{}, nil
 		},
+	}
+}
+
+func TestRunRejectsInvalidInverterConfiguration(t *testing.T) {
+	cfg := testConfig(0)
+	deps := testDeps(cfg)
+	deps.newInverter = func(got config.Config, logger *slog.Logger, metrics *observability.Metrics) (inverter.InverterReader, error) {
+		if got.SungrowHost != cfg.SungrowHost {
+			t.Error("inverter configuration was not forwarded")
+		}
+		return nil, errors.New("invalid certificate pin")
+	}
+	err := runWithContext(context.Background(), deps)
+	if err == nil || !strings.Contains(err.Error(), "failed to create inverter client") {
+		t.Fatalf("expected inverter configuration failure, got %v", err)
 	}
 }
 
@@ -340,8 +355,8 @@ func Test_runWithContext_closesInverterOnShutdown(t *testing.T) {
 	cfg := testConfig(0)
 	deps := testDeps(cfg)
 	fakeInv := &fakeInverter{}
-	deps.newInverter = func(host string, port int, logger *slog.Logger, metrics *observability.Metrics) inverter.InverterReader {
-		return fakeInv
+	deps.newInverter = func(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) (inverter.InverterReader, error) {
+		return fakeInv, nil
 	}
 
 	if err := runWithContext(ctx, deps); err != nil {

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/cbellee/ev-solar-charger/internal/controller"
 )
@@ -19,6 +20,9 @@ type Hub struct {
 
 // NewHub creates a new SSE hub.
 func NewHub(logger *slog.Logger) *Hub {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Hub{
 		clients: make(map[chan controller.StateSnapshot]struct{}),
 		logger:  logger,
@@ -57,9 +61,14 @@ func (h *Hub) Broadcast(snap controller.StateSnapshot) {
 
 // ServeHTTP handles SSE connections.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.serveHTTP(w, r, 15*time.Second)
+}
+
+func (h *Hub) serveHTTP(w http.ResponseWriter, r *http.Request, heartbeat time.Duration) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -69,21 +78,40 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ch := h.Subscribe()
 	defer h.Unsubscribe(ch)
+	write := func(frame string) bool {
+		if _, err := fmt.Fprint(w, frame); err != nil {
+			h.logger.WarnContext(r.Context(), "SSE write failed", "error", err)
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !write(": connected\n\n") {
+		return
+	}
+	ticker := time.NewTicker(heartbeat)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-ticker.C:
+			if !write(": heartbeat\n\n") {
+				return
+			}
 		case snap, ok := <-ch:
 			if !ok {
 				return
 			}
 			data, err := json.Marshal(snap)
 			if err != nil {
+				h.logger.ErrorContext(r.Context(), "SSE snapshot encoding failed", "error", err)
 				continue
 			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			if !write(fmt.Sprintf("data: %s\n\n", data)) {
+				return
+			}
 		}
 	}
 }

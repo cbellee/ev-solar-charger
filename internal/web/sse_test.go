@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bufio"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,39 @@ import (
 
 	"github.com/cbellee/ev-solar-charger/internal/controller"
 )
+
+func TestHubIdleStream(t *testing.T) {
+	hub := NewHub(nil)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub.serveHTTP(w, r, 20*time.Millisecond)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("idle stream must send headers without a controller update: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("unexpected streaming response: %d %v", resp.StatusCode, resp.Header)
+	}
+	reader := bufio.NewReader(resp.Body)
+	for _, want := range []string{": connected\n", "\n", ": heartbeat\n", "\n"} {
+		line, err := reader.ReadString('\n')
+		if err != nil || line != want {
+			t.Fatalf("frame = %q, err = %v; want %q", line, err, want)
+		}
+	}
+}
 
 type nonFlusherResponseWriter struct {
 	header http.Header

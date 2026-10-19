@@ -253,6 +253,8 @@ OAUTH_STATE_HMAC_KEY=<openssl rand -hex 32>
 # --- Sungrow inverter ---
 SUNGROW_HOST=192.168.88.106
 SUNGROW_PORT=8082
+# HTTPS firmware: change port to 443, set SUNGROW_TLS=true, and configure
+# SUNGROW_USERNAME, SUNGROW_PASSWORD_FILE and SUNGROW_CERT_SHA256 as below.
 
 # --- Charging logic ---
 POLL_INTERVAL_SECONDS=10
@@ -635,15 +637,24 @@ An `api_usage_snapshot` row is also written each minute, recording the cumulativ
 
 After each tick, the current `StateSnapshot` is broadcast to all connected SSE clients via the `Hub`, which the dashboard's `EventSource` consumes for real-time updates.
 
+Inverter read failures also publish an error snapshot, preserving the last
+successful reading timestamp and displaying the failure. SSE headers are sent
+immediately, even without any readings, and comment heartbeats are sent every
+15 seconds. The response requests disabled nginx buffering.
+
 ---
 
 ## Sungrow API Connection
 
 The WiNet-S dongle exposes a local network API (no cloud dependency):
 
-1. **WebSocket handshake** — connect to `ws://<host>:<port>/ws/home/overview`, send a `connect` message, receive a session token
-2. **HTTP register reads** — `GET http://<host>/device/getParam?param_addr=<addr>&token=<token>&...` returns register values as comma-separated 16-bit words (`"high,low"`)
-3. **Token refresh** — if the HTTP API returns `result_code: 106`, the client automatically reconnects via WebSocket to obtain a new token and retries the read
+1. **WebSocket handshake** — legacy firmware uses `ws://<host>:8082/ws/home/overview`; TLS mode uses `wss://<host>:443/ws/home/overview` (port configurable). Send `connect` to obtain a session token.
+2. **Local login and discovery** — when configured, send `login` with the local username/password and use the returned token for `devicelist` and register reads.
+3. **Register reads** — legacy HTTP uses port 80; TLS mode uses HTTPS on the configured port. `/device/getParam` returns space-separated hex bytes, with the low 16-bit word first.
+4. **Token refresh** — HTTP 401 or protocol result code 106/401 causes one reconnect, login and retry. Initial connection failures are retried on subsequent controller polls.
+
+For TLS configuration, password-file mounting and certificate pin verification,
+see [WiNet-S HTTPS firmware](../README.md#winet-s-https-firmware).
 
 All communication is on the local network. The dongle must be reachable from wherever the container runs.
 
@@ -709,7 +720,12 @@ All configuration is via environment variables:
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `SUNGROW_HOST` | Yes | — | IP or hostname of the WiNet-S dongle |
-| `SUNGROW_PORT` | No | `8082` | WiNet-S WebSocket port |
+| `SUNGROW_PORT` | No | `8082`, or `443` with TLS | WebSocket port; also HTTPS port in TLS mode |
+| `SUNGROW_TLS` | No | `false` | Enable HTTPS/WSS; legacy HTTP/WS remains the default |
+| `SUNGROW_USERNAME` | With password | — | Local WiNet-S username; requires TLS |
+| `SUNGROW_PASSWORD` | With username, unless using file | — | Local password; mutually exclusive with password file |
+| `SUNGROW_PASSWORD_FILE` | With username, unless using environment password | — | Mounted file containing the local password |
+| `SUNGROW_CERT_SHA256` | No | — | Explicit leaf-certificate pin, hex with optional colons; empty uses standard CA/hostname verification |
 | `TESLA_CLIENT_ID` | Yes | — | Tesla OAuth2 client ID |
 | `TESLA_CLIENT_SECRET` | Yes | — | Tesla OAuth2 client secret |
 | `TESLA_REFRESH_TOKEN` | Conditionally | — | Tesla OAuth2 refresh token (required if no token file exists) |
@@ -771,7 +787,7 @@ The following items must be completed by the user before running against real ha
 
 ### Network & Hardware
 
-6. **Ensure the WiNet-S dongle is reachable** from the container. Verify with: `curl http://<SUNGROW_HOST>:8082/`
+6. **Ensure the WiNet-S dongle is reachable** from the container. Legacy firmware serves HTTP on port 80 and WS on 8082; newer TLS firmware uses port 443. An HTTP refusal does not imply an offline module if HTTPS responds. See the TLS configuration above; do not disable certificate verification globally.
 7. **Verify the correct Modbus register addresses** for your specific Sungrow inverter model. The register addresses (5031, 5083, 5091) are based on the SG8.0RS; other models may use different addresses
 
 ### Operational

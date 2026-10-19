@@ -14,6 +14,10 @@ import (
 type Config struct {
 	SungrowHost                   string
 	SungrowPort                   int
+	SungrowTLS                    bool
+	SungrowCertSHA256             string
+	SungrowUsername               string
+	SungrowPassword               string
 	TeslaClientID                 string
 	TeslaClientSecret             string
 	TeslaRefreshToken             string
@@ -74,12 +78,39 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	cfg.SungrowPort, err = envInt("SUNGROW_PORT", 8082)
+	cfg.SungrowTLS, err = envBool("SUNGROW_TLS", false)
+	if err != nil {
+		return Config{}, err
+	}
+	defaultSungrowPort := 8082
+	if cfg.SungrowTLS {
+		defaultSungrowPort = 443
+	}
+	cfg.SungrowPort, err = envInt("SUNGROW_PORT", defaultSungrowPort)
 	if err != nil {
 		return Config{}, err
 	}
 	if err := validatePort("SUNGROW_PORT", cfg.SungrowPort); err != nil {
 		return Config{}, err
+	}
+	cfg.SungrowCertSHA256 = envOrDefault("SUNGROW_CERT_SHA256", "")
+	cfg.SungrowUsername = envOrDefault("SUNGROW_USERNAME", "")
+	cfg.SungrowPassword = os.Getenv("SUNGROW_PASSWORD")
+	if file := os.Getenv("SUNGROW_PASSWORD_FILE"); file != "" {
+		if cfg.SungrowPassword != "" {
+			return Config{}, fmt.Errorf("config: set only one of SUNGROW_PASSWORD and SUNGROW_PASSWORD_FILE")
+		}
+		password, err := os.ReadFile(file)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: read SUNGROW_PASSWORD_FILE: %w", err)
+		}
+		cfg.SungrowPassword = strings.TrimRight(string(password), "\r\n")
+	}
+	if (cfg.SungrowUsername == "") != (cfg.SungrowPassword == "") {
+		return Config{}, fmt.Errorf("config: SUNGROW_USERNAME and a password must both be set")
+	}
+	if !cfg.SungrowTLS && (cfg.SungrowUsername != "" || cfg.SungrowCertSHA256 != "") {
+		return Config{}, fmt.Errorf("config: Sungrow credentials and certificate pin require SUNGROW_TLS=true")
 	}
 
 	cfg.TeslaTestMode, err = envBool("TESLA_TEST_MODE", false)

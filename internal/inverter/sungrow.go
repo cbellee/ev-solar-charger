@@ -1,26 +1,34 @@
 package inverter
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cbellee/ev-solar-charger/internal/config"
 	"github.com/cbellee/ev-solar-charger/internal/observability"
 	"nhooyr.io/websocket"
 )
 
 // SungrowClient communicates with a Sungrow inverter via the WiNet-S dongle.
 // Architecture (per SungrowModbusWebClient reference implementation):
-//   - WebSocket on port 8082: connect → token, then devicelist → dev_type/dev_code
-//   - HTTP GET on port 80: /device/getParam with dev_type/dev_code → hex register bytes
+//   - Legacy: WS on port 8082, register reads over HTTP on port 80.
+//   - Secure: WSS/HTTPS on port 443, with login before device discovery.
 type SungrowClient struct {
 	host       string
 	port       int
@@ -32,6 +40,56 @@ type SungrowClient struct {
 	logger     *slog.Logger
 	metrics    *observability.Metrics
 	mu         sync.Mutex
+	secure     bool
+	username   string
+	password   string
+}
+
+// NewConfigured creates a client supporting legacy or authenticated TLS firmware.
+// A certificate pin explicitly trusts a leaf certificate, including factory certificates
+// that lack a hostname SAN. Without a pin, standard PKI verification is used.
+func NewConfigured(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) (*SungrowClient, error) {
+	if (cfg.SungrowUsername == "") != (cfg.SungrowPassword == "") {
+		return nil, fmt.Errorf("sungrow: username and password must both be set")
+	}
+	if !cfg.SungrowTLS && (cfg.SungrowUsername != "" || cfg.SungrowCertSHA256 != "") {
+		return nil, fmt.Errorf("sungrow: credentials and certificate pin require TLS")
+	}
+	client := New(cfg.SungrowHost, cfg.SungrowPort, logger, metrics)
+	client.secure = cfg.SungrowTLS
+	client.username = cfg.SungrowUsername
+	client.password = cfg.SungrowPassword
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableCompression = true
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.SungrowCertSHA256 != "" {
+		pin, err := hex.DecodeString(strings.ReplaceAll(cfg.SungrowCertSHA256, ":", ""))
+		if err != nil || len(pin) != sha256.Size {
+			return nil, fmt.Errorf("sungrow: SUNGROW_CERT_SHA256 must contain a SHA-256 certificate fingerprint")
+		}
+		// Pin verification replaces PKI/hostname verification for this client only.
+		transport.TLSClientConfig.InsecureSkipVerify = true
+		transport.TLSClientConfig.VerifyConnection = func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
+				return fmt.Errorf("sungrow: server supplied no certificate")
+			}
+			cert := state.PeerCertificates[0]
+			sum := sha256.Sum256(cert.Raw)
+			if !bytes.Equal(sum[:], pin) {
+				return fmt.Errorf("sungrow: server certificate does not match SUNGROW_CERT_SHA256")
+			}
+			now := time.Now()
+			if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+				return fmt.Errorf("sungrow: pinned certificate is outside its validity period")
+			}
+			return nil
+		}
+	}
+	client.httpClient.Transport = &sungrowTransport{rt: transport}
+	client.httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client, nil
 }
 
 // sungrowTransport wraps an http.RoundTripper to fix WebSocket header casing.
@@ -93,6 +151,8 @@ type deviceListData struct {
 // Connect establishes a WebSocket connection, obtains a session token,
 // and queries the device list for dev_type and dev_code.
 func (c *SungrowClient) Connect(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -101,13 +161,15 @@ func (c *SungrowClient) Connect(ctx context.Context) error {
 		c.wsConn.Close(websocket.StatusNormalClosure, "reconnecting")
 		c.wsConn = nil
 	}
+	c.token = ""
+	c.devType = ""
+	c.devCode = ""
 
-	var wsURL string
-	if strings.Contains(c.host, ":") {
-		wsURL = fmt.Sprintf("ws://%s/ws/home/overview", c.host)
-	} else {
-		wsURL = fmt.Sprintf("ws://%s:%d/ws/home/overview", c.host, c.port)
+	scheme := "ws"
+	if c.secure {
+		scheme = "wss"
 	}
+	wsURL := scheme + "://" + c.socketAddress() + "/ws/home/overview"
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPClient:      c.httpClient,
 		CompressionMode: websocket.CompressionDisabled,
@@ -129,6 +191,26 @@ func (c *SungrowClient) Connect(ctx context.Context) error {
 	if err := json.Unmarshal(token, &cd); err != nil || cd.Token == "" {
 		conn.Close(websocket.StatusInternalError, "no token")
 		return fmt.Errorf("sungrow: connect: no token in response")
+	}
+	if c.username != "" {
+		login, err := c.wsRPC(ctx, conn, map[string]string{
+			"lang": "en_us", "token": cd.Token, "service": "login",
+			"username": c.username, "passwd": c.password,
+		})
+		if err != nil {
+			if closeErr := conn.Close(websocket.StatusNormalClosure, "login failed"); closeErr != nil {
+				c.logger.WarnContext(ctx, "sungrow: close after login failure", "error", closeErr)
+			}
+			return fmt.Errorf("sungrow: login: %w", err)
+		}
+		var session connectData
+		if err := json.Unmarshal(login, &session); err != nil || session.Token == "" {
+			if closeErr := conn.Close(websocket.StatusNormalClosure, "no login token"); closeErr != nil {
+				c.logger.WarnContext(ctx, "sungrow: close after missing login token", "error", closeErr)
+			}
+			return fmt.Errorf("sungrow: login: no token in response")
+		}
+		cd.Token = session.Token
 	}
 
 	// Step 2: Query device list to get dev_type and dev_code.
@@ -154,6 +236,13 @@ func (c *SungrowClient) Connect(ctx context.Context) error {
 	c.logger.InfoContext(ctx, "sungrow: connected",
 		"host", c.host, "dev_type", c.devType, "dev_code", c.devCode)
 	return nil
+}
+
+func (c *SungrowClient) socketAddress() string {
+	if _, _, err := net.SplitHostPort(c.host); err == nil {
+		return c.host
+	}
+	return net.JoinHostPort(c.host, strconv.Itoa(c.port))
 }
 
 // wsRPC sends a JSON message over WebSocket and returns the result_data.
@@ -194,6 +283,14 @@ type registerResponse struct {
 
 // GetPowerData reads Modbus registers via the WiNet-S HTTP API.
 func (c *SungrowClient) GetPowerData(ctx context.Context) (PowerData, error) {
+	c.mu.Lock()
+	connected := c.token != ""
+	c.mu.Unlock()
+	if !connected {
+		if err := c.Connect(ctx); err != nil {
+			return PowerData{}, err
+		}
+	}
 	pvWatts, err := c.readRegisterWithRetry(ctx, 5031, 2, false)
 	if err != nil {
 		return PowerData{}, fmt.Errorf("sungrow: read pv power: %w", err)
@@ -246,10 +343,10 @@ func (c *SungrowClient) readRegisterWithRetry(ctx context.Context, addr, count i
 var errTokenExpired = fmt.Errorf("sungrow: token expired")
 
 func (c *SungrowClient) isTokenExpiry(err error) bool {
-	return err != nil && err.Error() == errTokenExpired.Error()
+	return errors.Is(err, errTokenExpired)
 }
 
-// readRegister reads Modbus registers via HTTP GET on port 80.
+// readRegister reads Modbus registers via HTTP(S) GET.
 // Per SungrowModbusWebClient, register reads use the HTTP API with
 // dev_type and dev_code obtained during WebSocket connect.
 // param_type: 0 = input registers (FC4), 1 = holding registers (FC3).
@@ -265,22 +362,34 @@ func (c *SungrowClient) readRegister(ctx context.Context, addr, count int, signe
 		return 0, fmt.Errorf("sungrow: read register %d: not connected", addr)
 	}
 
-	url := fmt.Sprintf("http://%s/device/getParam?dev_id=1&dev_type=%s&dev_code=%s"+
+	scheme, address := "http", c.host
+	if c.secure {
+		scheme, address = "https", c.socketAddress()
+	}
+	registerURL := fmt.Sprintf("%s://%s/device/getParam?dev_id=1&dev_type=%s&dev_code=%s"+
 		"&type=3&param_addr=%d&param_num=%d&param_type=0"+
 		"&token=%s&lang=en_us&time123456=%d",
-		c.host, devType, devCode, addr, count, token, time.Now().Unix())
+		scheme, address, devType, devCode, addr, count, token, time.Now().Unix())
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registerURL, nil)
 	if err != nil {
 		return 0, fmt.Errorf("sungrow: build request for register %d: %w", addr, err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// net/http includes the request URL (and session token) in url.Error.
+		var requestErr *url.Error
+		if errors.As(err, &requestErr) {
+			err = requestErr.Err
+		}
 		return 0, fmt.Errorf("sungrow: read register %d: %w", addr, err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return 0, errTokenExpired
+	}
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("sungrow: read register %d: status %d", addr, resp.StatusCode)
 	}
@@ -295,7 +404,7 @@ func (c *SungrowClient) readRegister(ctx context.Context, addr, count int, signe
 		return 0, fmt.Errorf("sungrow: read register %d: unmarshal: %w", addr, err)
 	}
 
-	if rr.ResultCode == 106 {
+	if rr.ResultCode == 106 || rr.ResultCode == 401 {
 		return 0, errTokenExpired
 	}
 

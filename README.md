@@ -129,6 +129,67 @@ Dashboard default URL:
 
 - http://localhost:8080
 
+### WiNet-S HTTPS firmware
+
+Older firmware uses anonymous WebSocket port 8082 and HTTP port 80. These
+defaults remain unchanged. Newer firmware may require HTTPS/WSS and a local
+WiNet-S login (not your iSolarCloud or Tesla credentials).
+
+Set the following in your deployment's `.env`, replacing the placeholders:
+
+```dotenv
+SUNGROW_HOST=<module IP or hostname, without a scheme>
+SUNGROW_TLS=true
+SUNGROW_PORT=443
+SUNGROW_USERNAME=admin
+SUNGROW_PASSWORD_FILE=/secrets/winet-password
+SUNGROW_CERT_SHA256=<verified SHA-256 leaf-certificate fingerprint>
+```
+
+Store only the local login password in `secrets/winet-password`, restrict its
+permissions, and do not commit it. The existing Compose configuration mounts
+`secrets/` read-only. Alternatively set `SUNGROW_PASSWORD` in the deployment
+environment; do not set both password sources. Credentials are rejected unless
+TLS is enabled. Existing `SUNGROW_PORT=8082` values must be explicitly changed
+to 443; the TLS default applies only when the port is unset.
+
+To inspect the certificate from a machine on the trusted LAN:
+
+```bash
+openssl s_client -connect <module-ip>:443 -showcerts </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates -sha256 -fingerprint
+```
+
+Compare the SHA-256 fingerprint with the certificate shown by the browser
+connected to the verified module before configuring it. Do not blindly trust
+an unauthenticated network certificate. Pinning explicitly trusts that exact
+leaf certificate instead of a public CA/hostname check, accommodates factory
+certificates without an IP SAN, and still enforces certificate validity dates
+and TLS 1.2 or newer. A mismatched, expired, or renewed certificate fails closed;
+verify a replacement before updating the pin. It does not change browser trust
+or the module's certificate. Leave the pin empty to use normal system CA and
+hostname verification for a properly issued certificate.
+
+Recreate the application container after environment changes (a restart alone
+does not reload Compose environment values):
+
+```bash
+docker compose up -d --no-deps --force-recreate solar-ev-charger
+# Older Synology installations use docker-compose instead of docker compose.
+```
+
+The client logs in before discovering devices and reauthenticates once if a
+register request reports an expired/unauthorized session. Initial connection
+failures are retried on subsequent controller polls. Incorrect credentials
+must be corrected promptly to avoid repeated login attempts.
+
+Dashboard SSE connections send headers immediately and an idle heartbeat every
+15 seconds, with nginx buffering disabled via `X-Accel-Buffering: no`. If nginx
+overrides this header, disable buffering for `/events` and set its read timeout
+above 15 seconds. Inverter read failures are published as error snapshots; the
+last successful reading timestamp is preserved rather than presenting stale
+values as fresh data.
+
 ## Build and Publish Container to GHCR
 
 This repo includes a GitHub Actions workflow:
