@@ -51,6 +51,9 @@ func (fakeStore) InsertAPIUsage(ctx context.Context, s storage.APIUsageSnapshot)
 func (fakeStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
 	return nil, nil
 }
+func (fakeStore) SampleAPIUsage(ctx context.Context, from, to time.Time, maxPoints int) ([]storage.APIUsageSnapshot, error) {
+	return nil, nil
+}
 func (fakeStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (fakeStore) Close() error                                                      { return nil }
 

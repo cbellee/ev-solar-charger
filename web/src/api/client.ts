@@ -186,7 +186,16 @@ export const api = {
     return jsonFetch<APIUsageResponse>("/api/usage");
   },
 
-  getAPIUsageHistory(): Promise<APIUsageSnapshot[]> {
-    return jsonFetch<APIUsageSnapshot[]>("/api/usage/history");
+  getAPIUsageHistory(
+    params: { from?: string; to?: string; points?: number } = {},
+  ): Promise<APIUsageSnapshot[]> {
+    const qs = new URLSearchParams();
+    if (params.from) qs.set("from", params.from);
+    if (params.to) qs.set("to", params.to);
+    if (params.points) qs.set("points", String(params.points));
+    const query = qs.toString();
+    return jsonFetch<APIUsageSnapshot[]>(
+      `/api/usage/history${query ? `?${query}` : ""}`,
+    );
   },
 };

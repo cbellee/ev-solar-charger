@@ -367,6 +367,63 @@ func (s *SQLiteStore) InsertAPIUsage(ctx context.Context, snap APIUsageSnapshot)
 	return nil
 }
 
+// SampleAPIUsage returns at most maxPoints API usage snapshots evenly spread
+// across the data in [from, to], ordered oldest first. Buckets are sized from
+// the span of stored data (not the requested range) so sparse history still
+// uses the full point budget. The latest snapshot of each bucket is kept.
+func (s *SQLiteStore) SampleAPIUsage(ctx context.Context, from, to time.Time, maxPoints int) ([]APIUsageSnapshot, error) {
+	if maxPoints < 1 {
+		maxPoints = 1
+	}
+	fromStr := from.UTC().Format("2006-01-02 15:04:05")
+	toStr := to.UTC().Format("2006-01-02 15:04:05")
+
+	var minUnix, maxUnix sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT CAST(strftime('%s', MIN(timestamp)) AS INTEGER), CAST(strftime('%s', MAX(timestamp)) AS INTEGER)
+		 FROM api_usage_snapshots WHERE timestamp BETWEEN ? AND ?`,
+		fromStr, toStr).Scan(&minUnix, &maxUnix)
+	if err != nil {
+		return nil, fmt.Errorf("storage: api usage span: %w", err)
+	}
+	snapshots := []APIUsageSnapshot{}
+	if !minUnix.Valid || !maxUnix.Valid {
+		return snapshots, nil
+	}
+
+	// floor(span/maxPoints)+1 guarantees at most maxPoints buckets.
+	bucketSecs := (maxUnix.Int64-minUnix.Int64)/int64(maxPoints) + 1
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, timestamp, data_calls, command_calls, wake_calls, stream_signals, estimated_cost
+		 FROM (
+		   SELECT *, ROW_NUMBER() OVER (
+		     PARTITION BY (CAST(strftime('%s', timestamp) AS INTEGER) - ?) / ?
+		     ORDER BY timestamp DESC, id DESC) AS rn
+		   FROM api_usage_snapshots WHERE timestamp BETWEEN ? AND ?
+		 ) WHERE rn = 1
+		 ORDER BY timestamp ASC, id ASC`,
+		minUnix.Int64, bucketSecs, fromStr, toStr)
+	if err != nil {
+		return nil, fmt.Errorf("storage: sample api usage: %w", err)
+	}
+	defer func() { _ = rows.Close() }() // rows.Err() is checked below
+
+	for rows.Next() {
+		var snap APIUsageSnapshot
+		var ts string
+		if err := rows.Scan(&snap.ID, &ts, &snap.DataCalls, &snap.CommandCalls, &snap.WakeCalls, &snap.StreamSignals, &snap.EstimatedCost); err != nil {
+			return nil, fmt.Errorf("storage: scan sampled api usage: %w", err)
+		}
+		snap.Timestamp = parseStoredTime(ts)
+		snapshots = append(snapshots, snap)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: iterate sampled api usage: %w", err)
+	}
+	return snapshots, nil
+}
+
 // QueryAPIUsage retrieves API usage snapshots within a date range.
 func (s *SQLiteStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]APIUsageSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,

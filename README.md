@@ -562,7 +562,7 @@ again", even though the refresh token was still valid.
 - GET /api/events: state/event history
 - GET /api/search: full text event search
 - GET /api/usage: current Tesla API usage and cost estimate
-- GET /api/usage/history: API usage snapshots
+- GET /api/usage/history: API usage snapshots in `from`..`to` (RFC3339, default last 30 days), downsampled to at most `points` (default 500, max 2000), oldest first
 - GET /auth/tesla: start OAuth flow
 - GET /auth/tesla/callback: OAuth callback
 - GET /.well-known/appspecific/com.tesla.3p.public-key.pem: Tesla domain verification key

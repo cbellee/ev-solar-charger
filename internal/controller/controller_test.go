@@ -197,6 +197,9 @@ func (m *mockStore) InsertAPIUsage(ctx context.Context, s storage.APIUsageSnapsh
 func (m *mockStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
 	return nil, nil
 }
+func (m *mockStore) SampleAPIUsage(ctx context.Context, from, to time.Time, maxPoints int) ([]storage.APIUsageSnapshot, error) {
+	return nil, nil
+}
 func (m *mockStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (m *mockStore) Close() error                                                      { return nil }
 

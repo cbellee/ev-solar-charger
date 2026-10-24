@@ -14,18 +14,10 @@ import {
 } from "recharts";
 import { api, getErrorMessage } from "@/api/client";
 import { Card } from "@/components/Card";
-
-type Range = "24h" | "7d" | "30d" | "all";
-
-const rangeHours: Record<Range, number | null> = {
-  "24h": 24,
-  "7d": 24 * 7,
-  "30d": 24 * 30,
-  all: null,
-};
+import { usageRangeWindow, type UsageRange } from "@/lib/usageRange";
 
 export default function UsagePage() {
-  const [range, setRange] = useState<Range>("7d");
+  const [range, setRange] = useState<UsageRange>("7d");
 
   const { data: usageSummary } = useQuery({
     queryKey: ["api-usage"],
@@ -34,22 +26,30 @@ export default function UsagePage() {
     staleTime: 30_000,
   });
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["usage-history"],
-    queryFn: () => api.getAPIUsageHistory(),
+  const { data, isLoading, error, dataUpdatedAt } = useQuery({
+    queryKey: ["usage-history", range],
+    queryFn: () =>
+      api.getAPIUsageHistory(usageRangeWindow(range, Date.now()).params),
     refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
   });
 
-  const filtered = useMemo(() => {
-    if (!data) return [];
-    const cutoffHours = rangeHours[range];
-    const cutoff =
-      cutoffHours == null ? 0 : Date.now() - cutoffHours * 3_600_000;
-    return data
-      .slice()
-      .reverse()
-      .filter((s) => new Date(s.Timestamp).getTime() >= cutoff);
-  }, [data, range]);
+  // Server returns snapshots oldest first, already limited to the range.
+  const filtered = useMemo(() => data ?? [], [data]);
+  const rangeWindow = useMemo(
+    () => usageRangeWindow(range, dataUpdatedAt || Date.now()),
+    [range, dataUpdatedAt],
+  );
+  const formatTick = (t: number) =>
+    rangeWindow.showTime
+      ? new Date(t).toLocaleTimeString(undefined, {
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : new Date(t).toLocaleDateString(undefined, {
+          month: "short",
+          day: "numeric",
+        });
 
   const chartData = useMemo(
     () =>
@@ -99,7 +99,7 @@ export default function UsagePage() {
               aria-label="Range"
               title="Range"
               value={range}
-              onChange={(e) => setRange(e.target.value as Range)}
+              onChange={(e) => setRange(e.target.value as UsageRange)}
               className={inputCls}
             >
               <option value="24h">Last 24h</option>
@@ -145,13 +145,8 @@ export default function UsagePage() {
                   <XAxis
                     dataKey="ts"
                     type="number"
-                    domain={["dataMin", "dataMax"]}
-                    tickFormatter={(t) =>
-                      new Date(t).toLocaleDateString(undefined, {
-                        month: "short",
-                        day: "numeric",
-                      })
-                    }
+                    domain={rangeWindow.domain}
+                    tickFormatter={formatTick}
                     stroke="#9ca3af"
                     fontSize={11}
                   />
@@ -191,13 +186,8 @@ export default function UsagePage() {
                   <XAxis
                     dataKey="ts"
                     type="number"
-                    domain={["dataMin", "dataMax"]}
-                    tickFormatter={(t) =>
-                      new Date(t).toLocaleDateString(undefined, {
-                        month: "short",
-                        day: "numeric",
-                      })
-                    }
+                    domain={rangeWindow.domain}
+                    tickFormatter={formatTick}
                     stroke="#9ca3af"
                     fontSize={11}
                   />
@@ -256,13 +246,8 @@ export default function UsagePage() {
                       <XAxis
                         dataKey="ts"
                         type="number"
-                        domain={["dataMin", "dataMax"]}
-                        tickFormatter={(t) =>
-                          new Date(t).toLocaleDateString(undefined, {
-                            month: "short",
-                            day: "numeric",
-                          })
-                        }
+                        domain={rangeWindow.domain}
+                        tickFormatter={formatTick}
                         stroke="#9ca3af"
                         fontSize={11}
                       />
