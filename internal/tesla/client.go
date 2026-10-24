@@ -53,8 +53,10 @@ type TeslaClient struct {
 	maxAmps      int
 	usage        *APIUsageTracker
 	wakeDelays   []time.Duration
-
+	// tokenPath is where rotated refresh tokens are persisted; empty disables.
+	tokenPath    string
 	mu           sync.Mutex
+	refreshMu    sync.Mutex
 	accessToken  string
 	refreshToken string
 	tokenExpiry  time.Time
@@ -101,6 +103,7 @@ func New(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics)
 		minAmps:      cfg.MinChargeAmps,
 		maxAmps:      cfg.MaxChargeAmps,
 		refreshToken: cfg.TeslaRefreshToken,
+		tokenPath:    cfg.TeslaTokenPath,
 		usage:        NewAPIUsageTracker(),
 	}
 
@@ -147,12 +150,24 @@ func buildCommandHTTPClient(caFile string) (*http.Client, error) {
 	return &http.Client{Timeout: 30 * time.Second, Transport: tr}, nil
 }
 
+// refreshAccessToken exchanges the refresh token. Refreshes are serialized:
+// Tesla refresh tokens are single-use, so concurrent refreshes could otherwise
+// persist an already-consumed token over a newer one.
 func (c *TeslaClient) refreshAccessToken(ctx context.Context) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	return c.refreshAccessTokenLocked(ctx)
+}
+
+func (c *TeslaClient) refreshAccessTokenLocked(ctx context.Context) error {
+	c.mu.Lock()
+	currentRefresh := c.refreshToken
+	c.mu.Unlock()
 	data := url.Values{
 		"grant_type":    {"refresh_token"},
 		"client_id":     {c.clientID},
 		"client_secret": {c.clientSecret},
-		"refresh_token": {c.refreshToken},
+		"refresh_token": {currentRefresh},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -185,11 +200,24 @@ func (c *TeslaClient) refreshAccessToken(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.accessToken = tokenResp.AccessToken
+	rotated := tokenResp.RefreshToken != "" && tokenResp.RefreshToken != currentRefresh
 	if tokenResp.RefreshToken != "" {
 		c.refreshToken = tokenResp.RefreshToken
 	}
 	c.tokenExpiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	c.mu.Unlock()
+
+	// Tesla refresh tokens are single-use: persist the rotated one so a
+	// restart does not fall back to a token Tesla has already invalidated.
+	if rotated && c.tokenPath != "" {
+		if err := WriteRefreshTokenFile(c.tokenPath, tokenResp.RefreshToken); err != nil {
+			if c.logger != nil {
+				c.logger.Error("tesla: persist rotated refresh token failed", "error", err, "token_path", c.tokenPath)
+			}
+		} else if c.logger != nil {
+			c.logger.Info("tesla: rotated refresh token saved", "token_path", c.tokenPath)
+		}
+	}
 
 	if c.logger != nil {
 		c.logger.Info("tesla: token refreshed", "expires_in", tokenResp.ExpiresIn)
@@ -586,9 +614,11 @@ func (c *TeslaClient) SetRefreshToken(ctx context.Context, refreshToken string) 
 		return fmt.Errorf("tesla: refresh token is required")
 	}
 
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
 	c.mu.Lock()
 	c.refreshToken = refreshToken
 	c.mu.Unlock()
 
-	return c.refreshAccessToken(ctx)
+	return c.refreshAccessTokenLocked(ctx)
 }

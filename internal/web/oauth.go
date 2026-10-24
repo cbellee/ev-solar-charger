@@ -15,11 +15,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/cbellee/ev-solar-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
 
 const (
@@ -151,7 +151,7 @@ func (s *oauthServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := writeRefreshTokenFile(s.cfg.TeslaTokenPath, tokens.RefreshToken); err != nil {
+	if err := tesla.WriteRefreshTokenFile(s.cfg.TeslaTokenPath, tokens.RefreshToken); err != nil {
 		s.logger.Error("oauth: write refresh token", "error", err)
 		renderOAuthHTML(w, http.StatusInternalServerError, "Token persistence failed", "Could not persist the Tesla refresh token. See server logs for details.")
 		return
@@ -285,45 +285,6 @@ func validSignedState(cookieValue, expectedState, signingKey string) bool {
 	_, _ = mac.Write([]byte(expectedState))
 	expectedSig := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(parts[1]), []byte(expectedSig))
-}
-
-func writeRefreshTokenFile(path, refreshToken string) error {
-	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("token path is required")
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create token directory: %w", err)
-	}
-
-	tmpFile, err := os.CreateTemp(dir, "refresh-token-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp token file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-
-	defer func() {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-	}()
-
-	if err := tmpFile.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod temp token file: %w", err)
-	}
-	if _, err := tmpFile.WriteString(strings.TrimSpace(refreshToken)); err != nil {
-		return fmt.Errorf("write temp token file: %w", err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		return fmt.Errorf("sync temp token file: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("close temp token file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace token file: %w", err)
-	}
-
-	return nil
 }
 
 func renderOAuthHTML(w http.ResponseWriter, status int, title, message string) {
