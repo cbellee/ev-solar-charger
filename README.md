@@ -129,6 +129,11 @@ Dashboard default URL:
 
 - http://localhost:8080
 
+On screens narrower than 768px the dashboard switches to a phone layout: a
+sticky status bar (state, charge amps, grid import or surplus), a large battery
+card with the charge-limit marker, a "Power now" list, and large control
+buttons. Wider screens keep the power-flow diagram and card grid.
+
 ### WiNet-S HTTPS firmware
 
 Older firmware uses anonymous WebSocket port 8082 and HTTP port 80. These

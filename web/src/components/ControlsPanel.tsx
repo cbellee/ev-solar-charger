@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/api/client";
-import type { Mode, StateSnapshot } from "@/api/types";
+import type { StateSnapshot } from "@/api/types";
+import { useChargerControls } from "@/hooks/useChargerControls";
 import { Card } from "./Card";
 import clsx from "clsx";
 
@@ -10,37 +9,9 @@ interface Props {
 }
 
 export function ControlsPanel({ snap }: Props) {
-  const qc = useQueryClient();
   const [amps, setAmps] = useState<number>(snap.targetAmps || 16);
-  const [error, setError] = useState<string | null>(null);
-
-  const setMode = useMutation({
-    mutationFn: (mode: Mode) => api.setMode(mode),
-    onError: (e) => setError((e as Error).message),
-    onSuccess: () => {
-      setError(null);
-      qc.invalidateQueries({ queryKey: ["state"] });
-    },
-  });
-
-  const control = useMutation({
-    mutationFn: (vars: { action: "start" | "stop" | "setAmps"; amps?: number }) =>
-      api.control(vars.action, vars.amps),
-    onError: (e) => setError((e as Error).message),
-    onSuccess: () => setError(null),
-  });
-
-  const refresh = useMutation({
-    mutationFn: () => api.forceRefresh(),
-    onError: (e) => setError((e as Error).message),
-    onSuccess: () => {
-      setError(null);
-      qc.invalidateQueries({ queryKey: ["state"] });
-    },
-  });
-
-  const isManual = snap.mode === "manual";
-  const busy = setMode.isPending || control.isPending || refresh.isPending;
+  const c = useChargerControls(snap);
+  const { isManual, busy, error } = c;
 
   return (
     <Card title="Controls">
@@ -49,10 +20,10 @@ export function ControlsPanel({ snap }: Props) {
           <div className="text-xs text-gray-400 mb-1.5">Mode</div>
           <div className="flex items-center gap-2">
             <div className="inline-flex rounded-md border border-gray-700 overflow-hidden">
-              <ModeBtn active={!isManual} onClick={() => setMode.mutate("auto")} disabled={busy}>
+              <ModeBtn active={!isManual} onClick={() => c.setMode("auto")} disabled={busy}>
                 Auto
               </ModeBtn>
-              <ModeBtn active={isManual} onClick={() => setMode.mutate("manual")} disabled={busy}>
+              <ModeBtn active={isManual} onClick={() => c.setMode("manual")} disabled={busy}>
                 Manual
               </ModeBtn>
             </div>
@@ -60,10 +31,10 @@ export function ControlsPanel({ snap }: Props) {
               type="button"
               className="rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 px-3 py-1.5 text-sm font-medium text-gray-200"
               disabled={busy}
-              onClick={() => refresh.mutate()}
+              onClick={c.refresh}
               title="Clear cooldowns and re-poll Tesla immediately"
             >
-              {refresh.isPending ? "Refreshing…" : "Force refresh"}
+              {c.refreshing ? "Refreshing…" : "Force refresh"}
             </button>
           </div>
         </div>
@@ -75,7 +46,7 @@ export function ControlsPanel({ snap }: Props) {
               type="button"
               className="rounded bg-green-600 hover:bg-green-500 disabled:opacity-50 px-3 py-1.5 text-sm font-medium"
               disabled={!isManual || busy}
-              onClick={() => control.mutate({ action: "start" })}
+              onClick={c.start}
             >
               Start
             </button>
@@ -83,7 +54,7 @@ export function ControlsPanel({ snap }: Props) {
               type="button"
               className="rounded bg-red-600 hover:bg-red-500 disabled:opacity-50 px-3 py-1.5 text-sm font-medium"
               disabled={!isManual || busy}
-              onClick={() => control.mutate({ action: "stop" })}
+              onClick={c.stop}
             >
               Stop
             </button>
@@ -101,7 +72,7 @@ export function ControlsPanel({ snap }: Props) {
                 type="button"
                 className="rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-3 py-1.5 text-sm font-medium"
                 disabled={!isManual || busy || amps <= 0}
-                onClick={() => control.mutate({ action: "setAmps", amps })}
+                onClick={() => c.setAmps(amps)}
               >
                 Set Amps
               </button>
