@@ -112,3 +112,22 @@ describe("api requests", () => {
     await expect(api.getState()).rejects.toBeInstanceOf(AuthError);
   });
 });
+
+describe("api.getAPIUsageHistory", () => {
+  it("sends the requested range to the server", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, []));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.getAPIUsageHistory({
+      from: "2026-10-01T00:00:00.000Z",
+      to: "2026-10-24T00:00:00.000Z",
+      points: 300,
+    });
+
+    const url = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost");
+    expect(url.pathname).toBe("/api/usage/history");
+    expect(url.searchParams.get("from")).toBe("2026-10-01T00:00:00.000Z");
+    expect(url.searchParams.get("to")).toBe("2026-10-24T00:00:00.000Z");
+    expect(url.searchParams.get("points")).toBe("300");
+  });
+});

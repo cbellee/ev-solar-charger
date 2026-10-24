@@ -705,7 +705,7 @@ All `/api/*` and `/events` routes require a valid Microsoft Entra ID ID token wh
 | `GET` | `/api/events` | Entra ID | Paginated events |
 | `GET` | `/api/search` | Entra ID | Full-text search (`q`, `from`, `to`, `limit`) |
 | `GET` | `/api/usage` | Entra ID | Current month's Tesla API usage counters and cost (JSON) |
-| `GET` | `/api/usage/history` | Entra ID | Historical API usage snapshots (`from`, `to`, `limit`) |
+| `GET` | `/api/usage/history` | Entra ID | Historical API usage snapshots (`from`, `to`, `points`; downsampled, oldest first) |
 | `GET` | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Public | Tesla public key endpoint for app/domain verification |
 | `GET` | `/auth/tesla` | Entra ID | Starts Tesla OAuth2 authorization code flow |
 | `GET` | `/auth/tesla/callback` | Public | OAuth2 callback endpoint for code exchange |

@@ -72,6 +72,10 @@ type Store interface {
 	Search(ctx context.Context, query string, from, to time.Time, limit int) ([]Event, error)
 	InsertAPIUsage(ctx context.Context, s APIUsageSnapshot) error
 	QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]APIUsageSnapshot, error)
+	// SampleAPIUsage returns at most maxPoints snapshots spread evenly across
+	// the stored data in [from, to], oldest first. Each point is the latest
+	// snapshot in its time bucket, so cumulative counters remain exact.
+	SampleAPIUsage(ctx context.Context, from, to time.Time, maxPoints int) ([]APIUsageSnapshot, error)
 	Prune(ctx context.Context, olderThan time.Duration) (int64, error)
 	Close() error
 }

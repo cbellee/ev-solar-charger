@@ -28,6 +28,10 @@ type recordingStore struct {
 	searchErr     error
 	searchQuery   string
 	searchLimit   int
+	usageSamples  []storage.APIUsageSnapshot
+	sampleFrom    time.Time
+	sampleTo      time.Time
+	samplePoints  int
 }
 
 func (s *recordingStore) Migrate(ctx context.Context) error                          { return nil }
@@ -59,6 +63,10 @@ func (s *recordingStore) InsertAPIUsage(ctx context.Context, snap storage.APIUsa
 }
 func (s *recordingStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
 	return []storage.APIUsageSnapshot{}, nil
+}
+func (s *recordingStore) SampleAPIUsage(ctx context.Context, from, to time.Time, maxPoints int) ([]storage.APIUsageSnapshot, error) {
+	s.sampleFrom, s.sampleTo, s.samplePoints = from, to, maxPoints
+	return s.usageSamples, nil
 }
 func (s *recordingStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) {
 	return 0, nil
@@ -529,6 +537,9 @@ func (s *nullStore) InsertAPIUsage(ctx context.Context, snap storage.APIUsageSna
 func (s *nullStore) QueryAPIUsage(ctx context.Context, from, to time.Time, limit int) ([]storage.APIUsageSnapshot, error) {
 	return []storage.APIUsageSnapshot{}, nil
 }
+func (s *nullStore) SampleAPIUsage(ctx context.Context, from, to time.Time, maxPoints int) ([]storage.APIUsageSnapshot, error) {
+	return []storage.APIUsageSnapshot{}, nil
+}
 func (s *nullStore) Prune(ctx context.Context, olderThan time.Duration) (int64, error) { return 0, nil }
 func (s *nullStore) Close() error                                                      { return nil }
 
@@ -594,5 +605,53 @@ func Test_handleAPIUsageHistory_returnsSnapshots(t *testing.T) {
 	}
 	if len(snapshots) != 0 {
 		t.Errorf("got %d snapshots, want 0", len(snapshots))
+	}
+}
+
+func Test_handleAPIUsageHistory_passesRangeAndPoints(t *testing.T) {
+	from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		query      string
+		wantFrom   time.Time
+		wantTo     time.Time
+		wantPoints int
+	}{
+		{
+			name:       "explicit range and points",
+			query:      "?from=" + from.Format(time.RFC3339) + "&to=" + to.Format(time.RFC3339) + "&points=300",
+			wantFrom:   from,
+			wantTo:     to,
+			wantPoints: 300,
+		},
+		{name: "default points", query: "?from=" + from.Format(time.RFC3339) + "&to=" + to.Format(time.RFC3339), wantFrom: from, wantTo: to, wantPoints: 500},
+		{name: "points capped", query: "?from=" + from.Format(time.RFC3339) + "&to=" + to.Format(time.RFC3339) + "&points=99999", wantFrom: from, wantTo: to, wantPoints: 2000},
+		{name: "non-positive points falls back to default", query: "?from=" + from.Format(time.RFC3339) + "&to=" + to.Format(time.RFC3339) + "&points=0", wantFrom: from, wantTo: to, wantPoints: 500},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &recordingStore{usageSamples: []storage.APIUsageSnapshot{{DataCalls: 7}}}
+			w := httptest.NewRecorder()
+			handleAPIUsageHistory(store)(w, httptest.NewRequest(http.MethodGet, "/api/usage/history"+tt.query, nil))
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			if !store.sampleFrom.Equal(tt.wantFrom) || !store.sampleTo.Equal(tt.wantTo) {
+				t.Errorf("range = %v..%v, want %v..%v", store.sampleFrom, store.sampleTo, tt.wantFrom, tt.wantTo)
+			}
+			if store.samplePoints != tt.wantPoints {
+				t.Errorf("points = %d, want %d", store.samplePoints, tt.wantPoints)
+			}
+			var got []storage.APIUsageSnapshot
+			if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(got) != 1 || got[0].DataCalls != 7 {
+				t.Errorf("body = %+v, want the sampled snapshots", got)
+			}
+		})
 	}
 }

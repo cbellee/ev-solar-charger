@@ -558,3 +558,81 @@ func Test_Prune_deletesAPIUsageSnapshots(t *testing.T) {
 		t.Errorf("remaining DataCalls = %d, want 200", snapshots[0].DataCalls)
 	}
 }
+
+func Test_SampleAPIUsage(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	const minutes = 3 * 24 * 60 // three days of per-minute snapshots
+	last := base.Add((minutes - 1) * time.Minute)
+
+	tests := []struct {
+		name      string
+		from, to  time.Time
+		maxPoints int
+		wantMin   int
+		wantMax   int
+		wantFirst time.Time
+		wantLast  time.Time
+	}{
+		{
+			name: "whole span is downsampled across the full range",
+			from: base.Add(-time.Hour), to: last.Add(time.Hour), maxPoints: 100,
+			wantMin: 90, wantMax: 100,
+			wantLast: last,
+		},
+		{
+			name: "small window returns every row when under the cap",
+			from: base, to: base.Add(9 * time.Minute), maxPoints: 100,
+			wantMin: 10, wantMax: 10,
+			wantFirst: base, wantLast: base.Add(9 * time.Minute),
+		},
+		{
+			name: "range outside the data is empty",
+			from: base.Add(-48 * time.Hour), to: base.Add(-24 * time.Hour), maxPoints: 100,
+			wantMin: 0, wantMax: 0,
+		},
+	}
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	for i := 0; i < minutes; i++ {
+		snap := APIUsageSnapshot{Timestamp: base.Add(time.Duration(i) * time.Minute), DataCalls: int64(i)}
+		if err := store.InsertAPIUsage(ctx, snap); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := store.SampleAPIUsage(ctx, tt.from, tt.to, tt.maxPoints)
+			if err != nil {
+				t.Fatalf("sample: %v", err)
+			}
+			if got == nil {
+				t.Fatal("got nil slice, want non-nil")
+			}
+			if len(got) < tt.wantMin || len(got) > tt.wantMax {
+				t.Fatalf("got %d points, want %d..%d", len(got), tt.wantMin, tt.wantMax)
+			}
+			if len(got) == 0 {
+				return
+			}
+			for i := 1; i < len(got); i++ {
+				if !got[i].Timestamp.After(got[i-1].Timestamp) {
+					t.Fatalf("not ascending at %d: %v then %v", i, got[i-1].Timestamp, got[i].Timestamp)
+				}
+			}
+			if !tt.wantFirst.IsZero() && !got[0].Timestamp.Equal(tt.wantFirst) {
+				t.Errorf("first = %v, want %v", got[0].Timestamp, tt.wantFirst)
+			}
+			if !got[len(got)-1].Timestamp.Equal(tt.wantLast) {
+				t.Errorf("last = %v, want %v (latest snapshot must always be included)", got[len(got)-1].Timestamp, tt.wantLast)
+			}
+			if span := got[len(got)-1].Timestamp.Sub(got[0].Timestamp); tt.maxPoints < minutes && tt.wantMax > 10 && span < 70*time.Hour {
+				t.Errorf("sampled span = %v, want ~72h (whole range, not just the newest rows)", span)
+			}
+			if want := int64(got[len(got)-1].Timestamp.Sub(base) / time.Minute); got[len(got)-1].DataCalls != want {
+				t.Errorf("last DataCalls = %d, want %d (latest value in bucket)", got[len(got)-1].DataCalls, want)
+			}
+		})
+	}
+}

@@ -378,17 +378,28 @@ func handleAPIUsage(ctrl *controller.Controller) http.HandlerFunc {
 	}
 }
 
+const (
+	defaultUsageHistoryPoints = 500
+	maxUsageHistoryPoints     = 2000
+)
+
+// handleAPIUsageHistory returns API usage snapshots in [from, to] (RFC3339,
+// default the last 30 days), downsampled to at most `points` entries and
+// ordered oldest first.
 func handleAPIUsageHistory(store storage.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		from := parseTimeParam(r, "from", now.Add(-30*24*time.Hour))
 		to := parseTimeParam(r, "to", now)
-		limit := parseIntParam(r, "limit", 1000)
-		if limit > 10000 {
-			limit = 10000
+		points := parseIntParam(r, "points", defaultUsageHistoryPoints)
+		if points <= 0 {
+			points = defaultUsageHistoryPoints
+		}
+		if points > maxUsageHistoryPoints {
+			points = maxUsageHistoryPoints
 		}
 
-		snapshots, err := store.QueryAPIUsage(r.Context(), from, to, limit)
+		snapshots, err := store.SampleAPIUsage(r.Context(), from, to, points)
 		if err != nil {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
