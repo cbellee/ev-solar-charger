@@ -6,6 +6,7 @@ import { Card } from "@/components/Card";
 import { ControlsPanel } from "@/components/ControlsPanel";
 import { APIUsageCard } from "@/components/APIUsageCard";
 import { ChargeLimitCard } from "@/components/ChargeLimitCard";
+import { MobileDashboard } from "@/components/MobileDashboard";
 import { STATE_BG, formatDurationHours, formatKW, formatTime } from "@/lib/format";
 import clsx from "clsx";
 
@@ -23,21 +24,26 @@ export default function DashboardPage() {
   if (!snap) return null;
 
   return (
-    <div className="grid gap-6 lg:grid-cols-3">
-      <Card title="System status" className="lg:col-span-2">
-        <PowerFlowDiagram snap={snap} />
-        <StatusFooter snap={snap} />
-      </Card>
-
-      <div className="space-y-6">
-        <SolarCard snap={snap} />
-        <EVChargingCard snap={snap} />
-        <ChargeLimitCard snap={snap} />
+    <>
+      <div className="md:hidden">
+        <MobileDashboard snap={snap} />
       </div>
+      <div className="hidden md:grid gap-6 lg:grid-cols-3">
+        <Card title="System status" className="lg:col-span-2">
+          <PowerFlowDiagram snap={snap} />
+          <StatusFooter snap={snap} />
+        </Card>
 
-      <ControlsPanel snap={snap} />
-      <APIUsageCard />
-    </div>
+        <div className="space-y-6">
+          <SolarCard snap={snap} />
+          <EVChargingCard snap={snap} />
+          <ChargeLimitCard snap={snap} />
+        </div>
+
+        <ControlsPanel snap={snap} />
+        <APIUsageCard />
+      </div>
+    </>
   );
 }
 
