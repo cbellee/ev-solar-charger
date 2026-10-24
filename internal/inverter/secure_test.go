@@ -47,9 +47,21 @@ func TestLiveWiNetTLS(t *testing.T) {
 	if err := client.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.ping(ctx); err != nil {
+		t.Fatalf("keepalive ping: %v", err)
+	}
+	client.mu.Lock()
+	sessionToken := client.token
+	client.mu.Unlock()
 	power, err := client.GetPowerData(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	client.mu.Lock()
+	reused := client.token == sessionToken
+	client.mu.Unlock()
+	if !reused {
+		t.Fatal("keepalive caused an unnecessary re-login")
 	}
 	for _, watts := range []float64{power.PVWatts, power.GridWatts, power.LoadWatts, power.SurplusWatts} {
 		if math.IsNaN(watts) || math.IsInf(watts, 0) {
@@ -119,6 +131,10 @@ func TestSecureSession(t *testing.T) {
 							code = 401
 						} else {
 							data["list"] = []map[string]int{{"dev_type": 21, "dev_code": 9736}}
+						}
+					case "ping":
+						if req["token"] != fmt.Sprintf("authenticated-%d", logins.Load()) {
+							code = 401
 						}
 					default:
 						t.Errorf("unexpected service %q", req["service"])

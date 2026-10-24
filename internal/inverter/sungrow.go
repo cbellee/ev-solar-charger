@@ -25,6 +25,23 @@ import (
 	"nhooyr.io/websocket"
 )
 
+const (
+	// sessionResetAfter is the number of consecutive failed polls on an
+	// established session before it is abandoned and a fresh login is made.
+	// The WiNet-S can keep answering result_code 120 for a stale session
+	// indefinitely; a new session recovers it.
+	sessionResetAfter = 3
+	// reconnectBackoffBase and reconnectBackoffMax bound the delay between
+	// repeated session resets so a genuinely faulty module is not hammered
+	// with logins.
+	reconnectBackoffBase = 30 * time.Second
+	reconnectBackoffMax  = 5 * time.Minute
+	// pingTimeout bounds the WebSocket keepalive round trip.
+	pingTimeout = 5 * time.Second
+	// defaultReadGap spaces out register reads for the WiNet-S's slow gateway.
+	defaultReadGap = 100 * time.Millisecond
+)
+
 // SungrowClient communicates with a Sungrow inverter via the WiNet-S dongle.
 // Architecture (per SungrowModbusWebClient reference implementation):
 //   - Legacy: WS on port 8082, register reads over HTTP on port 80.
@@ -43,6 +60,14 @@ type SungrowClient struct {
 	secure     bool
 	username   string
 	password   string
+
+	readGap time.Duration
+	now     func() time.Time
+	// failedPolls counts consecutive failed polls on the current session.
+	failedPolls int
+	// resets counts session resets/failed connects since the last good poll.
+	resets      int
+	nextConnect time.Time
 }
 
 // NewConfigured creates a client supporting legacy or authenticated TLS firmware.
@@ -127,6 +152,8 @@ func New(host string, port int, logger *slog.Logger, metrics *observability.Metr
 		httpClient: &http.Client{Timeout: 10 * time.Second, Transport: &sungrowTransport{rt: base}},
 		logger:     logger,
 		metrics:    metrics,
+		readGap:    defaultReadGap,
+		now:        time.Now,
 	}
 }
 
@@ -157,13 +184,7 @@ func (c *SungrowClient) Connect(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	// Close any existing connection.
-	if c.wsConn != nil {
-		c.wsConn.Close(websocket.StatusNormalClosure, "reconnecting")
-		c.wsConn = nil
-	}
-	c.token = ""
-	c.devType = ""
-	c.devCode = ""
+	c.closeSessionLocked("reconnecting")
 
 	scheme := "ws"
 	if c.secure {
@@ -267,10 +288,20 @@ func (c *SungrowClient) wsRPC(ctx context.Context, conn *websocket.Conn, msg map
 	}
 
 	if resp.ResultMsg != "success" {
-		return nil, fmt.Errorf("result_code %d: %s", resp.ResultCode, resp.ResultMsg)
+		return nil, &resultError{Code: resp.ResultCode, Msg: resp.ResultMsg}
 	}
 
 	return resp.ResultData, nil
+}
+
+// resultError is a non-success WiNet-S WebSocket reply.
+type resultError struct {
+	Code int
+	Msg  string
+}
+
+func (e *resultError) Error() string {
+	return fmt.Sprintf("result_code %d: %s", e.Code, e.Msg)
 }
 
 type registerResponse struct {
@@ -282,23 +313,32 @@ type registerResponse struct {
 }
 
 // GetPowerData reads Modbus registers via the WiNet-S HTTP API.
+// It keeps the WiNet-S session alive, and abandons a session that keeps
+// failing so the next poll logs in again (with backoff between resets).
 func (c *SungrowClient) GetPowerData(ctx context.Context) (PowerData, error) {
-	c.mu.Lock()
-	connected := c.token != ""
-	c.mu.Unlock()
-	if !connected {
-		if err := c.Connect(ctx); err != nil {
-			return PowerData{}, err
-		}
+	data, err := c.pollPowerData(ctx)
+	c.recordPoll(ctx, err)
+	return data, err
+}
+
+func (c *SungrowClient) pollPowerData(ctx context.Context) (PowerData, error) {
+	if err := c.ensureSession(ctx); err != nil {
+		return PowerData{}, err
 	}
 	pvWatts, err := c.readRegisterWithRetry(ctx, 5031, 2, false)
 	if err != nil {
 		return PowerData{}, fmt.Errorf("sungrow: read pv power: %w", err)
 	}
+	if err := c.pause(ctx); err != nil {
+		return PowerData{}, err
+	}
 
 	gridWatts, err := c.readRegisterWithRetry(ctx, 5083, 2, true)
 	if err != nil {
 		return PowerData{}, fmt.Errorf("sungrow: read grid power: %w", err)
+	}
+	if err := c.pause(ctx); err != nil {
+		return PowerData{}, err
 	}
 
 	loadWatts, err := c.readRegisterWithRetry(ctx, 5091, 2, true)
@@ -332,12 +372,161 @@ func (c *SungrowClient) readRegisterWithRetry(ctx context.Context, addr, count i
 
 	if c.isTokenExpiry(err) {
 		c.logger.InfoContext(ctx, "sungrow: token expired, reconnecting")
-		if reconnErr := c.Connect(ctx); reconnErr != nil {
+		if reconnErr := c.replaceSession(ctx, "token expired"); reconnErr != nil {
 			return 0, fmt.Errorf("sungrow: reconnect after token expiry: %w", reconnErr)
 		}
 		return c.readRegister(ctx, addr, count, signed)
 	}
 	return 0, err
+}
+
+// ensureSession verifies the current session with a keepalive ping, or
+// establishes a new one when there is none or it has died.
+func (c *SungrowClient) ensureSession(ctx context.Context) error {
+	c.mu.Lock()
+	connected := c.token != ""
+	c.mu.Unlock()
+	if connected {
+		err := c.ping(ctx)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("sungrow: keepalive: %w", err)
+		}
+		c.logger.WarnContext(ctx, "sungrow: keepalive failed, reconnecting", "error", err)
+		return c.replaceSession(ctx, "keepalive failed")
+	}
+
+	if err := c.waitForBackoff(); err != nil {
+		return err
+	}
+	return c.reconnect(ctx)
+}
+
+// replaceSession abandons an established session and logs in again. Each
+// replacement counts towards backoff so a module that accepts logins but keeps
+// rejecting the sessions is not flooded with logins.
+func (c *SungrowClient) replaceSession(ctx context.Context, reason string) error {
+	c.mu.Lock()
+	c.closeSessionLocked(reason)
+	c.scheduleReconnectLocked()
+	c.mu.Unlock()
+	if err := c.waitForBackoff(); err != nil {
+		return err
+	}
+	return c.reconnect(ctx)
+}
+
+func (c *SungrowClient) waitForBackoff() error {
+	c.mu.Lock()
+	wait := c.nextConnect.Sub(c.now())
+	c.mu.Unlock()
+	if wait > 0 {
+		return fmt.Errorf("sungrow: waiting %s before reconnecting", wait.Round(time.Second))
+	}
+	return nil
+}
+
+// reconnect logs in again and schedules backoff if that fails.
+func (c *SungrowClient) reconnect(ctx context.Context) error {
+	err := c.Connect(ctx)
+	if err != nil && ctx.Err() == nil {
+		c.mu.Lock()
+		c.scheduleReconnectLocked()
+		c.mu.Unlock()
+	}
+	return err
+}
+
+// ping sends the WiNet-S keepalive the vendor web UI sends. Reading the reply
+// also services WebSocket control frames, which are otherwise never read.
+// It fails only when the socket is dead or the session token is rejected.
+func (c *SungrowClient) ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.wsConn == nil {
+		return fmt.Errorf("sungrow: ping: no websocket")
+	}
+	_, err := c.wsRPC(ctx, c.wsConn, map[string]string{
+		"lang": "en_us", "service": "ping", "token": c.token,
+		"id": strconv.FormatInt(c.now().UnixNano(), 36),
+	})
+	var result *resultError
+	if errors.As(err, &result) && result.Code != 106 && result.Code != 401 {
+		c.logger.DebugContext(ctx, "sungrow: ping not acknowledged", "result_code", result.Code)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sungrow: ping: %w", err)
+	}
+	return nil
+}
+
+// recordPoll tracks consecutive failures on an established session and
+// abandons the session once it looks stale.
+func (c *SungrowClient) recordPoll(ctx context.Context, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil {
+		c.failedPolls, c.resets, c.nextConnect = 0, 0, time.Time{}
+		return
+	}
+	// Cancellation is not a module fault, and connect failures are already
+	// scheduled by reconnect.
+	if ctx.Err() != nil || c.token == "" {
+		return
+	}
+	c.failedPolls++
+	if c.failedPolls < sessionResetAfter {
+		return
+	}
+	c.scheduleReconnectLocked()
+	c.closeSessionLocked("session reset")
+	c.logger.WarnContext(ctx, "sungrow: abandoning session after repeated failures",
+		"failed_polls", sessionResetAfter, "retry_in", c.nextConnect.Sub(c.now()).Round(time.Second), "error", err)
+}
+
+// scheduleReconnectLocked applies exponential backoff: the first reset
+// reconnects on the next poll, later ones wait 30s, 60s, ... up to 5m.
+func (c *SungrowClient) scheduleReconnectLocked() {
+	c.resets++
+	c.failedPolls = 0
+	var delay time.Duration
+	if c.resets > 1 {
+		delay = reconnectBackoffBase << min(c.resets-2, 16)
+		delay = min(delay, reconnectBackoffMax)
+	}
+	c.nextConnect = c.now().Add(delay)
+}
+
+// closeSessionLocked drops the WebSocket and session token.
+func (c *SungrowClient) closeSessionLocked(reason string) {
+	c.token = ""
+	c.devType = ""
+	c.devCode = ""
+	if c.wsConn != nil {
+		if err := c.wsConn.Close(websocket.StatusNormalClosure, reason); err != nil {
+			c.logger.Debug("sungrow: close websocket", "error", err)
+		}
+		c.wsConn = nil
+	}
+}
+
+func (c *SungrowClient) pause(ctx context.Context) error {
+	if c.readGap <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(c.readGap)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("sungrow: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 var errTokenExpired = fmt.Errorf("sungrow: token expired")
@@ -406,6 +595,13 @@ func (c *SungrowClient) readRegister(ctx context.Context, addr, count int, signe
 
 	if rr.ResultCode == 106 || rr.ResultCode == 401 {
 		return 0, errTokenExpired
+	}
+	// 120 (I18N_COMMON_INTER_ABNORMAL) is what the WiNet-S returns to a session
+	// superseded by another login (web UI or another client); the keepalive
+	// still succeeds, so only a fresh login recovers it.
+	if rr.ResultCode == 120 {
+		return 0, fmt.Errorf("sungrow: read register %d: result_code %d: %s: %w",
+			addr, rr.ResultCode, rr.ResultMsg, errTokenExpired)
 	}
 
 	if rr.ResultCode != 0 && rr.ResultCode != 1 {

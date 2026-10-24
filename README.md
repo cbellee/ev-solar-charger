@@ -24,7 +24,7 @@ Solar EV Charger Controller monitors Sungrow inverter surplus power and automati
 
 - OAuth start endpoint and callback endpoint in the main app.
 - HMAC-signed state cookie validation for CSRF protection.
-- Refresh token persistence to file and runtime token activation after callback.
+- Refresh token persistence to file (including every rotated token) and runtime token activation after callback; the token file takes precedence over `TESLA_REFRESH_TOKEN` at startup.
 - Public well-known endpoint for Tesla app/domain key verification.
 
 ### Tesla Vehicle Command Protocol
@@ -276,6 +276,93 @@ registers 5031, 5083 and 5091. The register API and addresses did not need to be
 replaced. No module settings or vehicle commands were changed during this
 check. After deploying the new image and configuration, the operator confirmed
 normal application operation.
+
+#### Automatic recovery from stale WiNet-S sessions (`result_code 120`)
+
+After the HTTPS migration had been running for a while, the dashboard went stale
+with:
+
+```text
+sungrow: read pv power: sungrow: read register 5031: result_code 120: I18N_COMMON_INTER_ABNORMAL
+```
+
+The error repeated on every poll (about 254 times) until the app was
+restarted. Restarting fixed it without power-cycling the WiNet-S.
+
+**Root cause (confirmed on the live module):** the WiNet-S allows only one
+logged-in session per account. A new `admin` login, from the WiNet-S web UI or
+another client, invalidates the app's existing session. After that, every
+register read on the old session returns `result_code 120`
+(`I18N_COMMON_INTER_ABNORMAL`), not an "expired token" code, while the
+WebSocket `ping` on the same session still returns `success`. A live probe
+reproduced this: session A read register 5031 successfully, session B logged
+in, and A's next read returned `120` while B's read succeeded. The first
+failure followed a web UI login during the HTTPS investigation, and the second
+followed a hardware test that logged in.
+
+The client only reconnected after HTTP 401 or result codes `106`/`401`, so it
+kept retrying the superseded session indefinitely.
+
+The register request itself was never the problem: 32-bit values such as 5031
+are read with `param_num=2`, the low word comes first (confirmed by live
+readings), and three sequential reads every 10 seconds are a light load.
+
+The client in [sungrow.go](internal/inverter/sungrow.go) now:
+
+- **Treats `120` as a superseded session.** Like `106`/`401`, it logs in again
+  and retries the read within the same poll, so another login now causes no
+  missed update.
+- **Pings the session every poll.** It sends the same `ping` message the
+  WiNet-S web UI sends; the live module replies `success`. A closed socket or a
+  rejected token (`106`/`401`) triggers a reconnect before registers are read.
+  Other ping result codes are logged and tolerated.
+- **Abandons a session after repeated other failures.** After 3 consecutive
+  failed polls for any other reason, it closes the session and logs in again
+  on the next poll.
+- **Backs off between repeated logins.** The first replacement happens
+  immediately. If sessions keep being rejected or logins fail, it waits 30 s,
+  60 s, 2 min, 4 min, then 5 min (cap) before the next login, so a faulty
+  module is not flooded. A successful poll clears this history. Cancelled polls
+  are not counted.
+- **Spaces out register reads** by 100 ms. This is a precaution for the
+  module's slow internal gateway, not the cause of the error.
+
+**Operational note:** the app and the WiNet-S web UI share the single `admin`
+session. When you log in to the web UI, the app logs in again on its next
+poll, which ends the web UI session. To use the web UI for more than a quick
+look, stop the app container first. If the module supports a second local
+account, give the app its own account through `SUNGROW_USERNAME` and the
+password file.
+
+If `120` still continues after these automatic re-logins, the module itself
+is likely faulty: power-cycle the WiNet-S (unplug it for 30 seconds and allow a
+few minutes to reboot).
+
+Regression tests in [recovery_test.go](internal/inverter/recovery_test.go) use
+a fake WiNet-S where a newer login causes older sessions to get `120`, as on the
+real module. They cover recovery within one poll, backoff timing and its cap for
+persistent `120`/`106`, resets after repeated generic failures, intermittent
+failures that must not reset the session, keepalive handling (healthy,
+unsupported, rejected token, closed socket), and cancellation. Against the live
+module, the new client recovered within one poll after a second login, and the
+keepalive succeeds without an extra login.
+
+#### Tesla refresh-token rotation
+
+After the restart above, Tesla first rejected the stored token
+(`401 login_required`). Tesla refresh tokens can be used only once, and every
+refresh returns a new one. The app kept the new token only in memory, and at
+startup a `TESLA_REFRESH_TOKEN` environment value took priority over the token
+file. As a result, a restart could reuse a token Tesla had already invalidated.
+
+Now:
+
+- Each rotated refresh token is written to `TESLA_TOKEN_PATH`
+  (default `/data/tesla-refresh-token`) using a temporary file and rename, with
+  mode `0600`.
+- At startup the token file takes priority over `TESLA_REFRESH_TOKEN`; the
+  environment value is used only to seed the first start. The log line
+  `tesla refresh token loaded` reports which source was used.
 
 ## Build and Publish Container to GHCR
 

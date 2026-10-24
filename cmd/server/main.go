@@ -190,10 +190,13 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 		logger.Info("tesla test mode enabled", "message", "vehicle commands disabled; publishing projected surplus only")
 		vehicle = tesla.NewTestModeController()
 	} else {
-		if strings.TrimSpace(cfg.TeslaRefreshToken) == "" {
-			if tokenBytes, readErr := os.ReadFile(cfg.TeslaTokenPath); readErr == nil {
-				cfg.TeslaRefreshToken = strings.TrimSpace(string(tokenBytes))
-			}
+		token, source, tokenErr := tesla.ResolveRefreshToken(cfg.TeslaTokenPath, cfg.TeslaRefreshToken)
+		if tokenErr != nil {
+			logger.Warn("tesla refresh token file unreadable", "error", tokenErr, "token_path", cfg.TeslaTokenPath)
+		}
+		cfg.TeslaRefreshToken = token
+		if source != "" {
+			logger.Info("tesla refresh token loaded", "source", source)
 		}
 		if strings.TrimSpace(cfg.TeslaRefreshToken) == "" {
 			logger.Warn("tesla refresh token missing; Tesla data unavailable until /auth/tesla bootstrap is completed",
