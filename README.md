@@ -517,6 +517,39 @@ After your first successful sign-in, decode the `id_token` (e.g. via
 `ENTRA_ALLOWED_OIDS`. Any other tenant user attempting to sign in will then
 receive a 403.
 
+### Session lifetime and silent token refresh
+
+The SPA should only need an interactive sign-in when the Entra refresh token
+expires (24 hours for SPAs, non-sliding), and often not even then, because
+MSAL can reuse the browser's Microsoft sign-in session. The MSAL cache lives in
+`sessionStorage`, so closing the tab clears it. Reopening normally signs you
+back in automatically.
+
+**Why users were forced to sign in about every hour:** the backend validates
+the **ID token**, which lives about 1 hour. MSAL's `acquireTokenSilent` decides
+whether to refresh by looking only at the cached **access token**, which is for
+Microsoft Graph, unused here, and lives a randomised 60–90 minutes. It then
+returns the cached ID token without checking the ID token's own `exp`. Once the
+ID token expired but the access token had not, MSAL kept returning the expired
+ID token. The backend answered `401 invalid_token`, and the UI showed "Sign in
+again", even though the refresh token was still valid.
+
+**Fix:**
+
+- [`web/src/auth/idToken.ts`](web/src/auth/idToken.ts): `acquireFreshIdToken`
+  decodes the ID token's `exp`. If the token is expired, within 5 minutes of
+  expiry, or unreadable, it calls `acquireTokenSilent` again with
+  `forceRefresh: true`. That redeems the refresh token for a new ID token
+  without any prompt.
+- [`web/src/api/client.ts`](web/src/api/client.ts): `authorizedFetch` is used
+  by every `/api/*` call and by the `/events` SSE stream. If the backend still
+  returns `401`, for example because of clock skew, it forces one silent
+  refresh and retries once. A `403` (wrong tenant or user not allowed) is not
+  retried.
+- If the silent refresh itself fails, for example because the refresh token
+  expired or consent was revoked, `useIdToken` redirects to the Entra sign-in
+  page, as before.
+
 ## API Endpoints (Summary)
 
 - GET /: dashboard
@@ -541,6 +574,7 @@ Run tests:
 
 ```bash
 go test ./...
+(cd web && npm test)
 ```
 
 Build:
