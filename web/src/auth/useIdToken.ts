@@ -5,6 +5,11 @@ import {
   InteractionRequiredAuthError,
 } from "@azure/msal-browser";
 import { loginRequest } from "./msalConfig";
+import { acquireFreshIdToken } from "./idToken";
+
+export interface IdTokenOptions {
+  forceRefresh?: boolean;
+}
 
 let redirectInFlight = false;
 
@@ -12,29 +17,29 @@ let redirectInFlight = false;
 // ID token for the signed-in account. The Go backend validates this token
 // (audience = client ID) on /api/* and /events.
 //
-// MSAL caches tokens and refreshes silently when expired. If the cache is
-// missing or refresh fails (consent revoked, password changed, etc.), the
-// caller is redirected to the login flow.
-export function useIdToken(): () => Promise<string> {
+// MSAL caches tokens but only refreshes based on the access token's expiry,
+// so acquireFreshIdToken also checks the ID token's own expiry and forces a
+// silent refresh-token redemption when needed. Callers pass forceRefresh
+// after the backend rejects a token with 401. If silent refresh fails
+// (refresh token expired, consent revoked, etc.), the caller is redirected
+// to the login flow.
+export function useIdToken(): (options?: IdTokenOptions) => Promise<string> {
   const { instance, accounts } = useMsal();
 
-  return useCallback(async () => {
+  return useCallback(async (options?: IdTokenOptions) => {
     const account = accounts[0] ?? instance.getActiveAccount();
     if (!account) {
       throw new Error("no signed-in account");
     }
 
     try {
-      const result = await instance.acquireTokenSilent({
-        ...loginRequest,
-        account,
-      });
       // The ID token always has `aud = clientId` for tokens minted for this
       // app, so it's the right credential for backend validation.
-      if (!result.idToken) {
-        throw new Error("MSAL returned empty idToken");
-      }
-      return result.idToken;
+      return await acquireFreshIdToken(
+        instance,
+        { ...loginRequest, account },
+        { forceRefresh: options?.forceRefresh },
+      );
     } catch (err) {
       if (err instanceof InteractionRequiredAuthError) {
         if (redirectInFlight) {

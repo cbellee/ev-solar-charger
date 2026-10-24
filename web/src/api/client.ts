@@ -14,7 +14,9 @@ import type {
 // fetch helpers don't have to depend on MSAL directly. Returning null disables
 // the Authorization header (useful for tests); throwing surfaces auth failures
 // to the caller instead of silently degrading to unauthenticated requests.
-export type TokenGetter = () => Promise<string | null>;
+// forceRefresh asks for a newly minted token after the backend rejected the
+// cached one.
+export type TokenGetter = (options?: { forceRefresh?: boolean }) => Promise<string | null>;
 
 let getToken: TokenGetter = async () => null;
 
@@ -56,27 +58,56 @@ export function currentTokenGetter(): TokenGetter {
   return getToken;
 }
 
-async function jsonFetch<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
+async function fetchWithToken(
+  getTokenFn: TokenGetter,
+  forceRefresh: boolean,
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
   let token: string | null;
   try {
-    token = await getToken();
+    token = await getTokenFn(forceRefresh ? { forceRefresh } : undefined);
   } catch (error) {
     throw toAuthError(error);
   }
 
-  const baseHeaders: Record<string, string> = {
-    Accept: "application/json",
-    ...(init?.body ? { "Content-Type": "application/json" } : {}),
-    ...((init?.headers as Record<string, string> | undefined) ?? {}),
-  };
+  const headers = new Headers(init?.headers);
   if (token) {
-    baseHeaders.Authorization = `Bearer ${token}`;
+    headers.set("Authorization", "Bearer " + token);
+  }
+  return fetch(input, { ...init, headers });
+}
+
+// authorizedFetch attaches the bearer token and, if the backend rejects it
+// with 401 (typically an expired ID token), forces one silent token refresh
+// and retries. 403 means the user is authenticated but not allowed, so it is
+// returned unchanged. Request bodies must be replayable (strings, not streams).
+export async function authorizedFetch(
+  getTokenFn: TokenGetter,
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const res = await fetchWithToken(getTokenFn, false, input, init);
+  if (res.status !== 401) {
+    return res;
+  }
+  await res.body?.cancel();
+  return fetchWithToken(getTokenFn, true, input, init);
+}
+
+async function jsonFetch<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "application/json");
+  }
+  if (init?.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(input, {
+  const res = await authorizedFetch(getToken, input, {
     credentials: "same-origin",
     ...init,
-    headers: baseHeaders,
+    headers,
   });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
