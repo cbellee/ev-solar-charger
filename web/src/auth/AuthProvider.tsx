@@ -215,7 +215,7 @@ export function SignOutButton(): JSX.Element {
       className="text-sm text-slate-300 hover:text-white"
       onClick={() => {
         clearLoginHint();
-        void instance.logoutRedirect({ account: instance.getActiveAccount() ?? undefined });
+        void instance.logoutRedirect();
       }}
     >
       Sign out
