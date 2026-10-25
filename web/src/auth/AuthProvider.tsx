@@ -141,8 +141,9 @@ function AuthConfigError({ message }: { message: string }): JSX.Element {
   );
 }
 
-// AuthProvider wraps the app in MsalProvider and handles the redirect promise
-// so the active account is set before children render.
+// AuthProvider wraps the app in MsalProvider once the MSAL instance is
+// initialized, and handles the redirect promise so the active account is set
+// before children render.
 export function AuthProvider({ children }: { children: ReactNode }): JSX.Element {
   const [msalInstance, setMsalInstance] = useState<PublicClientApplication | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);

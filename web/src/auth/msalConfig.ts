@@ -102,10 +102,21 @@ export async function createMsalInstance(): Promise<{
     return { instance: null, error };
   }
 
-  return {
-    instance: new PublicClientApplication(buildMsalConfig(resolvedConfig)),
-    error: null,
-  };
+  const instance = new PublicClientApplication(buildMsalConfig(resolvedConfig));
+  try {
+    // The localStorage cache already holds account keys after a refresh, and
+    // reading them before initialize() completes throws
+    // uninitialized_public_client_application. Initialize before handing the
+    // instance to MsalProvider.
+    await instance.initialize();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Authentication initialization failed.";
+    // eslint-disable-next-line no-console
+    console.error("[msal]", message);
+    return { instance: null, error: message };
+  }
+
+  return { instance, error: null };
 }
 
 // Scopes used during interactive login. We only need the ID token (which
