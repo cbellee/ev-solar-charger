@@ -526,9 +526,21 @@ receive a 403.
 
 The SPA should only need an interactive sign-in when the Entra refresh token
 expires (24 hours for SPAs, non-sliding), and often not even then, because
-MSAL can reuse the browser's Microsoft sign-in session. The MSAL cache lives in
-`sessionStorage`, so closing the tab clears it. Reopening normally signs you
-back in automatically.
+MSAL can reuse the browser's Microsoft sign-in session.
+
+The MSAL cache lives in `localStorage`, so it is shared across tabs and survives
+mobile browsers discarding background tabs. msal-browser encrypts the cached
+tokens with a key held in a browser-session cookie, so they become unusable when
+the browser session ends.
+
+The app also remembers the signed-in username (not tokens) under
+`solar-ev.loginHint`. It passes this as `loginHint` when a sign-in redirect is
+needed, so Entra skips the account picker and returns without prompting while
+its own session is valid. Sign out clears the hint.
+
+Earlier builds used `sessionStorage`, which is scoped to one tab. A new tab, a
+bookmark or home-screen launch, or a discarded tab forced a full sign-in on
+almost every visit (#14).
 
 **Why users were forced to sign in about every hour:** the backend validates
 the **ID token**, which lives about 1 hour. MSAL's `acquireTokenSilent` decides

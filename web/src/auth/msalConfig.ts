@@ -33,18 +33,24 @@ function validateAuthConfig(config: EntraAuthConfig): string | null {
   return null;
 }
 
-function buildMsalConfig(config: EntraAuthConfig): Configuration {
+export function buildMsalConfig(
+  config: EntraAuthConfig,
+  origin: string = window.location.origin,
+): Configuration {
   return {
     auth: {
       clientId: config.clientId,
       authority: `https://login.microsoftonline.com/${config.tenantId}`,
-      redirectUri: window.location.origin,
-      postLogoutRedirectUri: window.location.origin,
+      redirectUri: origin,
+      postLogoutRedirectUri: origin,
     },
     cache: {
-      // sessionStorage clears on tab close; safer than localStorage for an
-      // admin app while still surviving full-page reloads within the tab.
-      cacheLocation: "sessionStorage",
+      // localStorage shares the session across tabs and survives mobile tab
+      // discards; sessionStorage forced a new sign-in on almost every visit.
+      // msal-browser encrypts these tokens with a key held in a
+      // browser-session cookie, so they are unusable after the browser
+      // session ends.
+      cacheLocation: "localStorage",
     },
     system: {
       loggerOptions: {
