@@ -13,6 +13,7 @@ import {
 } from "@azure/msal-browser";
 import type { AuthenticationResult, EventMessage } from "@azure/msal-browser";
 import { createMsalInstance, loginRequest } from "./msalConfig";
+import { clearLoginHint, interactiveRequest, rememberLoginHint } from "./loginHint";
 import { setTokenGetter } from "@/api/client";
 import { useIdToken } from "./useIdToken";
 
@@ -38,6 +39,7 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
     if (accounts.length > 0 && !instance.getActiveAccount()) {
       instance.setActiveAccount(accounts[0]);
     }
+    rememberLoginHint(instance.getActiveAccount() ?? accounts[0]);
     if (accounts.length > 0) {
       loginRedirectStarted.current = false;
     }
@@ -84,7 +86,7 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
         return;
       }
       loginRedirectStarted.current = true;
-      void instance.loginRedirect(loginRequest).catch((error: unknown) => {
+      void instance.loginRedirect(interactiveRequest(loginRequest)).catch((error: unknown) => {
         const errorCode =
           typeof error === "object" && error !== null && "errorCode" in error
             ? String(error.errorCode)
@@ -166,6 +168,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
           const result = msg.payload as AuthenticationResult;
           if (result.account) {
             instance?.setActiveAccount(result.account);
+            rememberLoginHint(result.account);
           }
         }
       });
@@ -211,6 +214,7 @@ export function SignOutButton(): JSX.Element {
       type="button"
       className="text-sm text-slate-300 hover:text-white"
       onClick={() => {
+        clearLoginHint();
         void instance.logoutRedirect();
       }}
     >

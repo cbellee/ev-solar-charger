@@ -6,6 +6,7 @@ import {
 } from "@azure/msal-browser";
 import { loginRequest } from "./msalConfig";
 import { acquireFreshIdToken } from "./idToken";
+import { interactiveRequest } from "./loginHint";
 
 export interface IdTokenOptions {
   forceRefresh?: boolean;
@@ -49,7 +50,7 @@ export function useIdToken(): (options?: IdTokenOptions) => Promise<string> {
         // Silent refresh failed; force a redirect to re-authenticate.
         redirectInFlight = true;
         try {
-          await instance.acquireTokenRedirect(loginRequest);
+          await instance.acquireTokenRedirect({ ...interactiveRequest(loginRequest), account });
         } catch (redirectError) {
           const errorCode =
             typeof redirectError === "object" && redirectError !== null && "errorCode" in redirectError
