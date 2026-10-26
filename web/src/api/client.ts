@@ -9,10 +9,11 @@ import type {
   Reading,
   StateSnapshot,
 } from "./types";
+import { CSRF_HEADER } from "@/auth/serverSession";
 
 // TokenGetter is supplied by the React tree (typically via useIdToken) so the
-// fetch helpers don't have to depend on MSAL directly. Returning null disables
-// the Authorization header (useful for tests); throwing surfaces auth failures
+// fetch helpers don't have to depend on MSAL directly. Returning null omits
+// the Authorization header so the server session cookie is used instead; throwing surfaces auth failures
 // to the caller instead of silently degrading to unauthenticated requests.
 // forceRefresh asks for a newly minted token after the backend rejected the
 // cached one.
@@ -75,6 +76,8 @@ async function fetchWithToken(
   if (token) {
     headers.set("Authorization", "Bearer " + token);
   }
+  // Required by the server for cookie-authenticated writes (CSRF defence).
+  headers.set(CSRF_HEADER, "XMLHttpRequest");
   return fetch(input, { ...init, headers });
 }
 

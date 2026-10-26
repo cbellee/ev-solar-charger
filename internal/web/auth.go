@@ -9,6 +9,13 @@ type Authenticator interface {
 	Middleware(next http.Handler) http.Handler
 }
 
+// SessionAuthenticator is implemented by Authenticators that also issue a
+// server-side session cookie. NewServer mounts SessionHandler at /auth/session.
+type SessionAuthenticator interface {
+	Authenticator
+	SessionHandler() http.Handler
+}
+
 // AuthenticatorFunc adapts an ordinary function into an Authenticator.
 type AuthenticatorFunc func(next http.Handler) http.Handler
 

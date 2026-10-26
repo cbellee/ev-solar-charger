@@ -275,12 +275,24 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	hub := deps.newHub(logger)
 	ctrl.OnUpdate = hub.Broadcast
 
-	// 10. Create Entra ID authenticator (validates ID tokens on /api/* and /events).
+	// 10. Create Entra ID authenticator (validates ID tokens on /api/* and
+	// /events, plus server-side session cookies when the store supports them).
+	var sessions *web.SessionManager
+	if sessionStore, ok := store.(web.SessionStore); ok {
+		sessions, err = web.NewSessionManager(sessionStore, cfg.OAuthStateHMACKey,
+			cfg.EntraSessionIdleTimeout, cfg.EntraSessionMaxAge, logger)
+		if err != nil {
+			return fmt.Errorf("failed to initialize sessions: %w", err)
+		}
+	} else {
+		logger.Warn("store does not support sessions; dashboard sign-in will not persist across browser restarts")
+	}
 	authCtx, authCancel := context.WithTimeout(ctx, web.HealthCheckTimeout)
 	authenticator, err := deps.newAuthenticator(authCtx, web.EntraConfig{
 		TenantID:    cfg.EntraTenantID,
 		ClientID:    cfg.EntraClientID,
 		AllowedOIDs: cfg.EntraAllowedOIDs,
+		Sessions:    sessions,
 		Logger:      logger,
 	})
 	authCancel()
@@ -326,6 +338,7 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 		Addr:    net.JoinHostPort(cfg.HTTPHost, strconv.Itoa(cfg.HTTPPort)),
 		Handler: handler,
 	}
+	hardenServer(primaryHTTPServer)
 	servers := []*http.Server{primaryHTTPServer}
 	startFns := []func() error{func() error { return primaryHTTPServer.ListenAndServe() }}
 
@@ -344,6 +357,7 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 				MinVersion:     tls.VersionTLS13,
 			},
 		}
+		hardenServer(tlsServer)
 
 		challengeAndRedirectHandler := certManager.HTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			httpsURL := "https://" + cfg.TLSDomain + r.URL.RequestURI()
@@ -354,6 +368,7 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 			Addr:    net.JoinHostPort(cfg.HTTPHost, strconv.Itoa(cfg.HTTPChallengePort)),
 			Handler: challengeAndRedirectHandler,
 		}
+		hardenServer(challengeServer)
 
 		servers = append(servers, tlsServer, challengeServer)
 		startFns = append(startFns,
@@ -399,4 +414,13 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	}
 
 	return nil
+}
+
+// hardenServer bounds slow or oversized clients. ReadTimeout and WriteTimeout
+// are deliberately left unset: they would cut off the long-lived SSE stream,
+// and request bodies are already size-limited by the handlers.
+func hardenServer(s *http.Server) {
+	s.ReadHeaderTimeout = 10 * time.Second
+	s.IdleTimeout = 120 * time.Second
+	s.MaxHeaderBytes = 64 << 10
 }

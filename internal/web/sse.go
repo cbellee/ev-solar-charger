@@ -11,11 +11,16 @@ import (
 	"github.com/cbellee/ev-solar-charger/internal/controller"
 )
 
+// DefaultMaxSSEClients caps concurrent /events streams so a misbehaving or
+// compromised client cannot exhaust goroutines and file descriptors.
+const DefaultMaxSSEClients = 64
+
 // Hub manages SSE client connections and broadcasts state updates.
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[chan controller.StateSnapshot]struct{}
-	logger  *slog.Logger
+	mu         sync.RWMutex
+	clients    map[chan controller.StateSnapshot]struct{}
+	maxClients int
+	logger     *slog.Logger
 }
 
 // NewHub creates a new SSE hub.
@@ -24,18 +29,29 @@ func NewHub(logger *slog.Logger) *Hub {
 		logger = slog.Default()
 	}
 	return &Hub{
-		clients: make(map[chan controller.StateSnapshot]struct{}),
-		logger:  logger,
+		clients:    make(map[chan controller.StateSnapshot]struct{}),
+		maxClients: DefaultMaxSSEClients,
+		logger:     logger,
 	}
 }
 
 // Subscribe registers a new SSE client.
 func (h *Hub) Subscribe() chan controller.StateSnapshot {
-	ch := make(chan controller.StateSnapshot, 10)
-	h.mu.Lock()
-	h.clients[ch] = struct{}{}
-	h.mu.Unlock()
+	ch, _ := h.subscribe(0)
 	return ch
+}
+
+// subscribe registers a client unless limit (> 0) clients are already
+// connected.
+func (h *Hub) subscribe(limit int) (chan controller.StateSnapshot, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if limit > 0 && len(h.clients) >= limit {
+		return nil, false
+	}
+	ch := make(chan controller.StateSnapshot, 10)
+	h.clients[ch] = struct{}{}
+	return ch, true
 }
 
 // Unsubscribe removes an SSE client.
@@ -76,7 +92,13 @@ func (h *Hub) serveHTTP(w http.ResponseWriter, r *http.Request, heartbeat time.D
 		return
 	}
 
-	ch := h.Subscribe()
+	ch, ok := h.subscribe(h.maxClients)
+	if !ok {
+		h.logger.WarnContext(r.Context(), "SSE client limit reached", "limit", h.maxClients)
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "too many event streams", http.StatusServiceUnavailable)
+		return
+	}
 	defer h.Unsubscribe(ch)
 	write := func(frame string) bool {
 		if _, err := fmt.Fprint(w, frame); err != nil {

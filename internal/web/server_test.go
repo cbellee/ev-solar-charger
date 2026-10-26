@@ -122,3 +122,36 @@ func Test_NewServer_allowsEntraConfigWithoutAuth(t *testing.T) {
 		t.Fatalf("ClientID = %q, want %q", resp.ClientID, "entra-client-id")
 	}
 }
+
+func Test_NewServer_setsSecurityHeaders(t *testing.T) {
+	handler := NewServer(newTestCtrl(t), &nullStore{}, NewHub(nil), nil, NoopAuthenticator{}, oauthTestConfig())
+
+	tests := []struct {
+		path      string
+		wantCache string
+	}{
+		{"/healthz", ""},
+		{"/api/state", "no-store"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tt.path, nil))
+			want := map[string]string{
+				"X-Content-Type-Options":  "nosniff",
+				"X-Frame-Options":         "SAMEORIGIN",
+				"Content-Security-Policy": "frame-ancestors 'self'",
+				"Referrer-Policy":         "strict-origin-when-cross-origin",
+				"Cache-Control":           tt.wantCache,
+			}
+			for k, v := range want {
+				if got := w.Header().Get(k); got != v {
+					t.Errorf("%s = %q, want %q", k, got, v)
+				}
+			}
+			if w.Header().Get("Strict-Transport-Security") == "" {
+				t.Error("missing Strict-Transport-Security")
+			}
+		})
+	}
+}
