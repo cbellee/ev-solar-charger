@@ -3,6 +3,7 @@ import { useMsal } from "@azure/msal-react";
 import {
   BrowserAuthErrorCodes,
   InteractionRequiredAuthError,
+  type AccountInfo,
   type IPublicClientApplication,
 } from "@azure/msal-browser";
 import { loginRequest } from "./msalConfig";
@@ -22,6 +23,21 @@ function isInteractionInProgress(error: unknown): boolean {
     error !== null &&
     "errorCode" in error &&
     String(error.errorCode) === BrowserAuthErrorCodes.interactionInProgress
+  );
+}
+
+// needsReauthentication reports whether a silent-renewal failure means MSAL
+// can no longer mint tokens without the user. Besides InteractionRequired,
+// that includes timed_out: once the refresh token passes its 24h SPA lifetime
+// MSAL falls back to a hidden iframe, which can time out (e.g. when the
+// browser blocks Entra's third-party cookies).
+function needsReauthentication(error: unknown): boolean {
+  if (error instanceof InteractionRequiredAuthError) return true;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "errorCode" in error &&
+    String(error.errorCode) === BrowserAuthErrorCodes.timedOut
   );
 }
 
@@ -60,36 +76,46 @@ async function redirectToSignIn(
 export function useIdToken(): (options?: IdTokenOptions) => Promise<string | null> {
   const { instance, accounts } = useMsal();
 
-  return useCallback(async (options?: IdTokenOptions) => {
-    const account = accounts[0] ?? instance.getActiveAccount();
-    if (!account) {
-      if (options?.forceRefresh) {
-        await redirectToSignIn(instance, undefined);
-        throw new Error("no signed-in account");
-      }
-      return null;
-    }
+  return useCallback(
+    (options?: IdTokenOptions) => acquireIdToken(instance, accounts, options),
+    [instance, accounts],
+  );
+}
 
-    try {
-      // The ID token always has `aud = clientId` for tokens minted for this
-      // app, so it's the right credential for backend validation.
-      return await acquireFreshIdToken(
-        instance,
-        { ...loginRequest, account },
-        { forceRefresh: options?.forceRefresh },
-      );
-    } catch (err) {
-      if (!(err instanceof InteractionRequiredAuthError)) {
-        throw err;
-      }
-      // MSAL's refresh token is gone or expired; fall back to the session
-      // cookie before forcing an interactive sign-in.
-      if (await getServerSession()) {
-        return null;
-      }
-      await redirectToSignIn(instance, account);
-      // acquireTokenRedirect navigates away; control rarely returns here.
+// acquireIdToken implements useIdToken's getter; exported for tests.
+export async function acquireIdToken(
+  instance: IPublicClientApplication,
+  accounts: readonly AccountInfo[],
+  options?: IdTokenOptions,
+): Promise<string | null> {
+  const account = accounts[0] ?? instance.getActiveAccount();
+  if (!account) {
+    if (options?.forceRefresh) {
+      await redirectToSignIn(instance, undefined);
+      throw new Error("no signed-in account");
+    }
+    return null;
+  }
+
+  try {
+    // The ID token always has `aud = clientId` for tokens minted for this
+    // app, so it's the right credential for backend validation.
+    return await acquireFreshIdToken(
+      instance,
+      { ...loginRequest, account },
+      { forceRefresh: options?.forceRefresh },
+    );
+  } catch (err) {
+    if (!needsReauthentication(err)) {
       throw err;
     }
-  }, [instance, accounts]);
+    // MSAL can no longer renew silently; fall back to the session cookie
+    // before forcing an interactive sign-in.
+    if (await getServerSession()) {
+      return null;
+    }
+    await redirectToSignIn(instance, account);
+    // acquireTokenRedirect navigates away; control rarely returns here.
+    throw err;
+  }
 }
