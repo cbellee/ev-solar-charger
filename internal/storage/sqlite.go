@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS api_usage_snapshots (
     estimated_cost  REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_api_usage_timestamp ON api_usage_snapshots(timestamp);
-`
+` + authSessionsDDL
 	_, err := s.db.ExecContext(ctx, ddl)
 	if err != nil {
 		return fmt.Errorf("storage: migrate: %w", err)

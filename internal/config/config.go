@@ -61,9 +61,15 @@ type Config struct {
 	EntraTenantID                 string
 	EntraClientID                 string
 	EntraAllowedOIDs              []string
-	LogLevel                      slog.Level
-	DBPath                        string
-	DBRetentionDays               int
+	// EntraSessionIdleTimeout ends a dashboard session after this long
+	// without use.
+	EntraSessionIdleTimeout time.Duration
+	// EntraSessionMaxAge forces a fresh Entra sign-in this long after the
+	// last one, however active the session is.
+	EntraSessionMaxAge time.Duration
+	LogLevel           slog.Level
+	DBPath             string
+	DBRetentionDays    int
 }
 
 // Load reads configuration from environment variables, applies defaults,
@@ -394,6 +400,24 @@ func Load() (Config, error) {
 				cfg.EntraAllowedOIDs = append(cfg.EntraAllowedOIDs, trimmed)
 			}
 		}
+	}
+
+	sessionIdleHours, err := envInt("ENTRA_SESSION_IDLE_HOURS", 24)
+	if err != nil {
+		return Config{}, err
+	}
+	if sessionIdleHours < 1 {
+		return Config{}, fmt.Errorf("config: ENTRA_SESSION_IDLE_HOURS must be >= 1, got %d", sessionIdleHours)
+	}
+	cfg.EntraSessionIdleTimeout = time.Duration(sessionIdleHours) * time.Hour
+
+	sessionMaxDays, err := envInt("ENTRA_SESSION_MAX_DAYS", 7)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.EntraSessionMaxAge = time.Duration(sessionMaxDays) * 24 * time.Hour
+	if cfg.EntraSessionMaxAge < cfg.EntraSessionIdleTimeout {
+		return Config{}, fmt.Errorf("config: ENTRA_SESSION_MAX_DAYS (%d) must cover ENTRA_SESSION_IDLE_HOURS (%d)", sessionMaxDays, sessionIdleHours)
 	}
 
 	cfg.LogLevel, err = parseLogLevel(envOrDefault("LOG_LEVEL", "info"))

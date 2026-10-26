@@ -469,3 +469,37 @@ func Test_Load_tlsEnabledWithDomain(t *testing.T) {
 		t.Fatalf("TLSDomain = %q, want %q", cfg.TLSDomain, "tesla.bellee.net")
 	}
 }
+
+func TestEntraSessionDurations(t *testing.T) {
+	tests := []struct {
+		name     string
+		idle     string
+		maxDays  string
+		wantIdle time.Duration
+		wantMax  time.Duration
+		wantErr  bool
+	}{
+		{name: "defaults", wantIdle: 24 * time.Hour, wantMax: 7 * 24 * time.Hour},
+		{name: "custom", idle: "12", maxDays: "3", wantIdle: 12 * time.Hour, wantMax: 3 * 24 * time.Hour},
+		{name: "idle below minimum", idle: "0", wantErr: true},
+		{name: "max shorter than idle", idle: "72", maxDays: "1", wantErr: true},
+		{name: "not a number", idle: "abc", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("ENTRA_SESSION_IDLE_HOURS", tt.idle)
+			t.Setenv("ENTRA_SESSION_MAX_DAYS", tt.maxDays)
+			cfg, err := Load()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if cfg.EntraSessionIdleTimeout != tt.wantIdle || cfg.EntraSessionMaxAge != tt.wantMax {
+				t.Fatalf("idle=%v max=%v, want %v %v", cfg.EntraSessionIdleTimeout, cfg.EntraSessionMaxAge, tt.wantIdle, tt.wantMax)
+			}
+		})
+	}
+}

@@ -1,10 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import {
-  AuthenticatedTemplate,
-  MsalProvider,
-  UnauthenticatedTemplate,
-  useMsal,
-} from "@azure/msal-react";
+import { MsalProvider, useMsal } from "@azure/msal-react";
 import {
   BrowserAuthErrorCodes,
   EventType,
@@ -14,16 +9,24 @@ import {
 import type { AuthenticationResult, EventMessage } from "@azure/msal-browser";
 import { createMsalInstance, loginRequest } from "./msalConfig";
 import { clearLoginHint, interactiveRequest, rememberLoginHint } from "./loginHint";
-import { setTokenGetter } from "@/api/client";
+import { currentTokenGetter, setTokenGetter } from "@/api/client";
 import { useIdToken } from "./useIdToken";
+import {
+  createServerSession,
+  endServerSession,
+  getServerSession,
+  signInRequest,
+  type ServerSessionUser,
+} from "./serverSession";
 
 // AuthBootstrap registers the MSAL token getter with the API client and
-// forces interactive login when there's no signed-in account. Renders the
-// app only once an account is present.
+// forces interactive login when there's neither a signed-in MSAL account nor
+// a valid server session cookie. Renders the app only once one is present.
 function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   const { instance, accounts, inProgress } = useMsal();
   const getIdToken = useIdToken();
   const [ready, setReady] = useState(false);
+  const [sessionUser, setSessionUser] = useState<ServerSessionUser | null>(null);
   const [startupError, setStartupError] = useState<string | null>(null);
   const loginRedirectStarted = useRef(false);
 
@@ -63,6 +66,21 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
             instance.setActiveAccount(account);
           }
         }
+        // A completed interactive sign-in carries the server-login nonce, so
+        // its ID token can be exchanged for a session cookie.
+        if (result?.idToken && !(await createServerSession(result.idToken))) {
+          console.warn("auth: could not start server session; sign-in will not survive MSAL cache loss");
+        }
+        if (!instance.getActiveAccount()) {
+          const user = await getServerSession();
+          if (disposed) {
+            return;
+          }
+          setSessionUser(user);
+        }
+        if (disposed) {
+          return;
+        }
         setReady(true);
       } catch (error) {
         if (disposed) {
@@ -81,25 +99,27 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
   }, [instance]);
 
   useEffect(() => {
-    if (ready && accounts.length === 0 && inProgress === InteractionStatus.None) {
+    if (ready && accounts.length === 0 && !sessionUser && inProgress === InteractionStatus.None) {
       if (loginRedirectStarted.current) {
         return;
       }
       loginRedirectStarted.current = true;
-      void instance.loginRedirect(interactiveRequest(loginRequest)).catch((error: unknown) => {
-        const errorCode =
-          typeof error === "object" && error !== null && "errorCode" in error
-            ? String(error.errorCode)
-            : "";
-        if (errorCode === BrowserAuthErrorCodes.interactionInProgress) {
-          return;
-        }
-        loginRedirectStarted.current = false;
-        const message = error instanceof Error ? error.message : "Sign-in redirect failed.";
-        setStartupError(message);
-      });
+      void signInRequest(interactiveRequest(loginRequest))
+        .then((request) => instance.loginRedirect(request))
+        .catch((error: unknown) => {
+          const errorCode =
+            typeof error === "object" && error !== null && "errorCode" in error
+              ? String(error.errorCode)
+              : "";
+          if (errorCode === BrowserAuthErrorCodes.interactionInProgress) {
+            return;
+          }
+          loginRedirectStarted.current = false;
+          const message = error instanceof Error ? error.message : "Sign-in redirect failed.";
+          setStartupError(message);
+        });
     }
-  }, [accounts.length, inProgress, instance, ready]);
+  }, [accounts.length, inProgress, instance, ready, sessionUser]);
 
   if (startupError) {
     return <AuthConfigError message={startupError} />;
@@ -113,15 +133,14 @@ function AuthBootstrap({ children }: { children: ReactNode }): JSX.Element {
     );
   }
 
+  if (accounts.length > 0 || sessionUser) {
+    return <>{children}</>;
+  }
+
   return (
-    <>
-      <AuthenticatedTemplate>{children}</AuthenticatedTemplate>
-      <UnauthenticatedTemplate>
-        <div className="min-h-screen flex items-center justify-center text-slate-300">
-          Signing in&hellip;
-        </div>
-      </UnauthenticatedTemplate>
-    </>
+    <div className="min-h-screen flex items-center justify-center text-slate-300">
+      Signing in&hellip;
+    </div>
   );
 }
 
@@ -215,8 +234,18 @@ export function SignOutButton(): JSX.Element {
       type="button"
       className="text-sm text-slate-300 hover:text-white"
       onClick={() => {
-        clearLoginHint();
-        void instance.logoutRedirect();
+        void (async () => {
+          let idToken: string | null = null;
+          try {
+            idToken = await currentTokenGetter()();
+          } catch {
+            // No MSAL token; the session cookie identifies the user instead.
+          }
+          // Revoke server sessions on every device before leaving Entra.
+          await endServerSession(idToken);
+          clearLoginHint();
+          await instance.logoutRedirect();
+        })();
       }}
     >
       Sign out

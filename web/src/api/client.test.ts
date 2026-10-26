@@ -84,6 +84,17 @@ describe("authorizedFetch", () => {
 
     await expect(authorizedFetch(getToken, "/api/state")).rejects.toBeInstanceOf(AuthError);
   });
+
+  it("relies on the session cookie when there is no token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await authorizedFetch(async () => null, "/api/mode", { method: "POST" });
+
+    const headers = new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers);
+    expect(headers.has("Authorization")).toBe(false);
+    expect(headers.get("X-Requested-With")).toBe("XMLHttpRequest");
+  });
 });
 
 describe("api requests", () => {

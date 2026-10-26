@@ -493,6 +493,10 @@ Backend (`.env`):
 - `ENTRA_CLIENT_ID`: application (client) ID of the SPA registration
 - `ENTRA_ALLOWED_OIDS` (optional): comma-separated list of user `oid` claims
   allowed to sign in. Leave empty to allow any user from the tenant.
+- `ENTRA_SESSION_IDLE_HOURS` (optional, default `24`): the server session
+  cookie expires after this many hours without use.
+- `ENTRA_SESSION_MAX_DAYS` (optional, default `7`): a fresh Entra sign-in is
+  required this many days after the last one, however active the session is.
 
 Frontend (`web/.env`):
 
@@ -566,6 +570,55 @@ again", even though the refresh token was still valid.
 - If the silent refresh itself fails, for example because the refresh token
   expired or consent was revoked, `useIdToken` redirects to the Entra sign-in
   page, as before.
+
+### Server session cookie (iPhone / iOS)
+
+iOS deletes browser-session cookies whenever Safari or the home-screen app is
+terminated. That throws away msal-browser's cache-encryption key, so MSAL loses
+the sign-in, and SPA refresh tokens are capped at 24 hours anyway. To keep the
+dashboard signed in, the server also issues its own session cookie (#18):
+
+1. Before every interactive sign-in the SPA calls `POST /auth/session/login`.
+   The server sets a short-lived, HttpOnly `__Host-ev_login` cookie and returns
+   a nonce derived from it, which the SPA passes to Entra.
+2. After the redirect back, the SPA posts the new ID token to
+   `POST /auth/session`. The server accepts it only if the token's `nonce`
+   matches this browser's login cookie, the token was issued in the last 10
+   minutes, and the nonce has not been used before. A captured ID token
+   therefore cannot be turned into a session.
+3. The server stores a SHA-256 hash of a random session ID in the
+   `auth_sessions` SQLite table and sets the `__Host-ev_session` cookie
+   (HttpOnly, Secure, SameSite=Strict). It expires after
+   `ENTRA_SESSION_IDLE_HOURS` without use, and after `ENTRA_SESSION_MAX_DAYS`
+   regardless.
+4. When MSAL has no usable account, requests omit the `Authorization` header
+   and the cookie authenticates them. Bearer tokens always take precedence.
+   Cookie-authenticated writes must send `X-Requested-With` (CSRF defence).
+
+The tenant and `ENTRA_ALLOWED_OIDS` checks run on every cookie request, so
+removing a user from the allowlist locks them out immediately. **Sign out**
+deletes all of the user's sessions on every device. To revoke sessions
+manually, for example after disabling a user in Entra, run against the
+database: `DELETE FROM auth_sessions;` (everyone) or
+`DELETE FROM auth_sessions WHERE oid = '<oid>';`. Otherwise an account
+disabled in Entra keeps its session until `ENTRA_SESSION_MAX_DAYS` at most.
+
+An open `/events` live-update stream is cut off when its credential lapses.
+Cookie streams re-check their session every minute, so a stream ends within a
+minute of sign-out, revocation or expiry. Bearer streams end when the ID token
+expires. The SPA then reconnects with a fresh credential or shows the sign-in
+prompt. Tokens are accepted only in the `Authorization` header, never in the
+URL (`?access_token=` is rejected).
+
+Other hardening: every response carries `X-Content-Type-Options: nosniff`,
+`Referrer-Policy`, HSTS and a same-origin framing policy (`X-Frame-Options:
+SAMEORIGIN` / `frame-ancestors 'self'`, which still allows MSAL's hidden
+renewal iframe). API and auth responses are `Cache-Control: no-store`. At most
+64 `/events` streams can be open at once (more get `503` with `Retry-After`),
+and the HTTP servers set header-read and idle timeouts.
+
+The `__Host-` cookies need HTTPS, so the session cookie is not used on plain
+`http://localhost` development servers. Those keep using bearer tokens only.
 
 ## API Endpoints (Summary)
 

@@ -7,6 +7,16 @@ import { useIdToken } from "@/auth/useIdToken";
 
 export type SSEStatus = "connecting" | "open" | "error" | "closed" | "auth-error";
 
+// Thrown from onclose so fetch-event-source retries. The server ends the
+// stream when its credential lapses (token expiry, sign-out, session expiry);
+// reconnecting re-authenticates or surfaces an auth error.
+class StreamClosed extends Error {
+  constructor() {
+    super("event stream closed by server");
+    this.name = "StreamClosed";
+  }
+}
+
 // Subscribes to /events SSE and seeds the TanStack Query cache for ["state"].
 // Uses @microsoft/fetch-event-source so we can attach the MSAL ID token via
 // the Authorization header (native EventSource cannot set headers).
@@ -55,6 +65,11 @@ export function useStateStream(): {
         }
       },
       onerror: (streamError) => {
+        if (streamError instanceof StreamClosed) {
+          setError(null);
+          setStatus("connecting");
+          return;
+        }
         const message = getErrorMessage(streamError);
         if (streamError instanceof AuthError) {
           qc.removeQueries({ queryKey: ["state"], exact: true });
@@ -69,7 +84,7 @@ export function useStateStream(): {
         setStatus("error");
       },
       onclose: () => {
-        setStatus((current) => (current === "auth-error" ? current : "closed"));
+        throw new StreamClosed();
       },
     });
 

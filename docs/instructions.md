@@ -268,6 +268,8 @@ WAKE_THRESHOLD_POLLS=6
 ENTRA_TENANT_ID=<your tenant GUID>
 ENTRA_CLIENT_ID=<app registration client ID>
 ENTRA_ALLOWED_OIDS=<comma-separated user OIDs allowed to sign in>
+ENTRA_SESSION_IDLE_HOURS=24                 # server session cookie idle timeout
+ENTRA_SESSION_MAX_DAYS=7                    # forces a fresh Entra sign-in after this
 VITE_ENTRA_TENANT_ID=${ENTRA_TENANT_ID}     # baked into the SPA at Docker build time
 VITE_ENTRA_CLIENT_ID=${ENTRA_CLIENT_ID}
 HTTP_HOST=0.0.0.0
@@ -689,7 +691,7 @@ The SPA acquires an ID token via MSAL.js and attaches `Authorization: Bearer …
 
 ### API Endpoints
 
-All `/api/*` and `/events` routes require a valid Microsoft Entra ID ID token whose `oid` claim is listed in `ENTRA_ALLOWED_OIDS`. Public routes are explicitly marked.
+All `/api/*` and `/events` routes require a valid Microsoft Entra ID ID token whose `oid` claim is listed in `ENTRA_ALLOWED_OIDS`, or a valid server session cookie (`__Host-ev_session`, issued by `/auth/session`; see the README). Cookie-authenticated `POST` requests must also send `X-Requested-With`. Tokens are read from the `Authorization` header only; `?access_token=` query parameters are rejected. Open `/events` streams are closed when the ID token expires or, for cookie sessions, within a minute of sign-out or session expiry. Public routes are explicitly marked.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -709,6 +711,10 @@ All `/api/*` and `/events` routes require a valid Microsoft Entra ID ID token wh
 | `GET` | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Public | Tesla public key endpoint for app/domain verification |
 | `GET` | `/auth/tesla` | Entra ID | Starts Tesla OAuth2 authorization code flow |
 | `GET` | `/auth/tesla/callback` | Public | OAuth2 callback endpoint for code exchange |
+| `POST` | `/auth/session/login` | Public | Starts a sign-in; returns the nonce to pass to Entra and sets the login cookie |
+| `POST` | `/auth/session` | Entra ID (nonce-bound) | Exchanges a just-issued ID token for the server session cookie |
+| `GET` | `/auth/session` | Session cookie | Reports whether the session cookie is valid; renews its idle expiry |
+| `DELETE` | `/auth/session` | Session cookie or Entra ID | Signs out: revokes all of the user's sessions |
 | `GET` | `/healthz` | Public | Health check (returns 200) |
 
 ---
@@ -743,6 +749,8 @@ All configuration is via environment variables:
 | `ENTRA_TENANT_ID` | Yes | — | Microsoft Entra tenant GUID |
 | `ENTRA_CLIENT_ID` | Yes | — | Microsoft Entra app registration client ID |
 | `ENTRA_ALLOWED_OIDS` | Yes | — | Comma-separated list of user OIDs allowed to sign in |
+| `ENTRA_SESSION_IDLE_HOURS` | No | `24` | Hours without use before the server session cookie expires (min 1) |
+| `ENTRA_SESSION_MAX_DAYS` | No | `7` | Days after an Entra sign-in before a new one is required; must cover the idle timeout |
 | `VITE_ENTRA_TENANT_ID` | Yes (build-time) | — | Same tenant GUID, baked into the SPA at Docker build time |
 | `VITE_ENTRA_CLIENT_ID` | Yes (build-time) | — | Same client ID, baked into the SPA at Docker build time |
 | `POLL_INTERVAL_SECONDS` | No | `10` | Seconds between control loop ticks |

@@ -253,3 +253,20 @@ func Test_Hub_serveHTTP_streamingNotSupported(t *testing.T) {
 		t.Fatalf("unexpected body: %q", w.body.String())
 	}
 }
+
+func Test_Hub_serveHTTP_rejectsWhenFull(t *testing.T) {
+	hub := NewHub(nil)
+	hub.maxClients = 1
+	ch := hub.Subscribe()
+	defer hub.Unsubscribe(ch)
+
+	w := httptest.NewRecorder()
+	hub.serveHTTP(w, httptest.NewRequest(http.MethodGet, "/events", nil), time.Second)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After")
+	}
+}
