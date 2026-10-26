@@ -40,27 +40,38 @@ type APIUsage struct {
 	DiscountedDataEligible bool      `json:"discountedDataEligible"`
 }
 
+// BillingMonthStart returns the start of the Tesla Fleet API billing month
+// containing t. Tesla bills per calendar month in UTC.
+func BillingMonthStart(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
 // APIUsageTracker provides thread-safe tracking of Tesla API usage per billing month.
 type APIUsageTracker struct {
-	mu            sync.RWMutex
+	mu            sync.Mutex
 	dataCalls     int64
 	commandCalls  int64
 	wakeCalls     int64
 	streamSignals int64
 	monthStart    time.Time
+	now           func() time.Time
 }
 
 // NewAPIUsageTracker creates a new tracker initialised to the current month.
 func NewAPIUsageTracker() *APIUsageTracker {
-	now := time.Now()
-	return &APIUsageTracker{
-		monthStart: time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()),
-	}
+	return newAPIUsageTracker(time.Now)
 }
 
+func newAPIUsageTracker(now func() time.Time) *APIUsageTracker {
+	return &APIUsageTracker{monthStart: BillingMonthStart(now()), now: now}
+}
+
+// resetIfNewMonth zeroes the counters once the billing month has rolled over.
+// It runs on reads as well as writes so a snapshot taken after the rollover
+// never reports the previous month's totals.
 func (t *APIUsageTracker) resetIfNewMonth() {
-	now := time.Now()
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	monthStart := BillingMonthStart(t.now())
 	if monthStart.After(t.monthStart) {
 		t.dataCalls = 0
 		t.commandCalls = 0
@@ -96,14 +107,9 @@ func (t *APIUsageTracker) RecordWake() {
 
 // Snapshot returns the current API usage.
 func (t *APIUsageTracker) Snapshot() APIUsage {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	dataCost := float64(t.dataCalls) / 500.0
-	commandCost := float64(t.commandCalls) / 1000.0
-	wakeCost := float64(t.wakeCalls) / 50.0
-	streamCost := float64(t.streamSignals) / 150000.0
-	total := dataCost + commandCost + wakeCost + streamCost
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.resetIfNewMonth()
 
 	return APIUsage{
 		DataCalls:     t.dataCalls,
@@ -111,20 +117,28 @@ func (t *APIUsageTracker) Snapshot() APIUsage {
 		WakeCalls:     t.wakeCalls,
 		StreamSignals: t.streamSignals,
 		MonthStarted:  t.monthStart,
-		EstimatedCost: total,
+		EstimatedCost: EstimateCost(t.dataCalls, t.commandCalls, t.wakeCalls, t.streamSignals),
 	}
 }
 
+// EstimateCost returns the Fleet API cost in USD, before the monthly credit,
+// for the given call counts.
+func EstimateCost(dataCalls, commandCalls, wakeCalls, streamSignals int64) float64 {
+	return float64(dataCalls)/500.0 +
+		float64(commandCalls)/1000.0 +
+		float64(wakeCalls)/50.0 +
+		float64(streamSignals)/150000.0
+}
+
 // SetCounts seeds the tracker with previously persisted counters. The
-// monthStart of the supplied data must match the current calendar month
+// monthStart of the supplied data must match the current billing month
 // for the counters to be applied; older snapshots are ignored so a new
 // month always starts from zero.
 func (t *APIUsageTracker) SetCounts(dataCalls, commandCalls, wakeCalls, streamSignals int64, monthStart time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	now := time.Now()
-	currentMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-	if monthStart.IsZero() || monthStart.Before(currentMonth) {
+	currentMonth := BillingMonthStart(t.now())
+	if monthStart.IsZero() || BillingMonthStart(monthStart).Before(currentMonth) {
 		return
 	}
 	t.dataCalls = dataCalls

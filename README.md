@@ -55,7 +55,7 @@ The proxy's TLS key MUST be different from `fleet-key.pem`.
 ### Web UI and APIs
 
 - Live dashboard with SSE updates.
-- Tesla API usage and monthly cost estimate view.
+- Tesla API usage and monthly cost estimate view, counted per UTC calendar month to match Tesla billing. `TESLA_USAGE_BASELINE` realigns the counters with Tesla's billing dashboard; see [docs/instructions.md](docs/instructions.md#5-persist-data).
 - History, sessions, events, and text search endpoints.
 
 ### Deployment-ready runtime

@@ -635,6 +635,16 @@ Each tick's readings are accumulated in memory. At the end of each calendar minu
 
 An `api_usage_snapshot` row is also written each minute, recording the cumulative Tesla API call counts (data, command, wake, stream signals) and estimated cost for the current billing month.
 
+Usage counters follow Tesla's billing month, which is the calendar month in UTC (it starts at 10 or 11 am on the 1st in Sydney). On startup the counters are restored from the highest value of each counter in this month's snapshots.
+
+To realign the counters with Tesla's billing dashboard (Developer dashboard → Billing), copy the figures and the dashboard's "last updated" time into `TESLA_USAGE_BASELINE` and restart:
+
+```bash
+TESLA_USAGE_BASELINE=2026-10-26T03:27:00Z,data=1449,command=1550,wake=19
+```
+
+On the next start the counters become those figures plus any calls recorded since that time. The correction is applied once and recorded as an `api_usage_baseline` event; later restarts keep counting from it, and the setting is ignored once the month has ended, so it can be left in place or removed.
+
 ### 6. Notify UI
 
 After each tick, the current `StateSnapshot` is broadcast to all connected SSE clients via the `Hub`, which the dashboard's `EventSource` consumes for real-time updates.
@@ -775,6 +785,7 @@ All configuration is via environment variables:
 | `LOG_LEVEL` | No | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `DB_PATH` | No | `/data/solar-ev-charger.db` | SQLite database path |
 | `DB_RETENTION_DAYS` | No | `365` | Days of data to retain before pruning |
+| `TESLA_USAGE_BASELINE` | No | — | One-off correction of this month's Tesla API usage counters to Tesla's billing dashboard: `<RFC3339 time>,data=N,command=N,wake=N` (see [Tesla API usage](#5-persist-data)) |
 | `OTEL_TRACES_EXPORTER` | No | `none` | Set to `otlp` and configure `OTEL_EXPORTER_OTLP_ENDPOINT` to ship traces |
 | `OTEL_METRICS_EXPORTER` | No | `none` | Set to `otlp` to ship metrics |
 | `OTEL_LOGS_EXPORTER` | No | `none` | Set to `otlp` to ship logs |
