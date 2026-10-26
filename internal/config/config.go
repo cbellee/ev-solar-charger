@@ -70,6 +70,9 @@ type Config struct {
 	LogLevel           slog.Level
 	DBPath             string
 	DBRetentionDays    int
+	// TeslaUsageBaseline, when set, corrects this month's Tesla API usage
+	// counters to figures read from Tesla's billing dashboard.
+	TeslaUsageBaseline *UsageBaseline
 }
 
 // Load reads configuration from environment variables, applies defaults,
@@ -435,7 +438,58 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: DB_RETENTION_DAYS must be >= 1, got %d", cfg.DBRetentionDays)
 	}
 
+	if raw := strings.TrimSpace(os.Getenv("TESLA_USAGE_BASELINE")); raw != "" {
+		baseline, err := ParseUsageBaseline(raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.TeslaUsageBaseline = &baseline
+	}
+
 	return cfg, nil
+}
+
+// UsageBaseline is a set of Tesla API call counts read from Tesla's billing
+// dashboard at a point in time.
+type UsageBaseline struct {
+	At           time.Time
+	DataCalls    int64
+	CommandCalls int64
+	WakeCalls    int64
+}
+
+// String returns the canonical TESLA_USAGE_BASELINE form of b.
+func (b UsageBaseline) String() string {
+	return fmt.Sprintf("%s,data=%d,command=%d,wake=%d",
+		b.At.UTC().Format(time.RFC3339), b.DataCalls, b.CommandCalls, b.WakeCalls)
+}
+
+// ParseUsageBaseline parses "<RFC3339 time>,data=N,command=N,wake=N".
+func ParseUsageBaseline(raw string) (UsageBaseline, error) {
+	parts := strings.Split(raw, ",")
+	if len(parts) != 4 {
+		return UsageBaseline{}, fmt.Errorf("config: TESLA_USAGE_BASELINE must be \"<RFC3339 time>,data=N,command=N,wake=N\", got %q", raw)
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(parts[0]))
+	if err != nil {
+		return UsageBaseline{}, fmt.Errorf("config: TESLA_USAGE_BASELINE time: %w", err)
+	}
+	b := UsageBaseline{At: at.UTC()}
+	fields := map[string]*int64{"data": &b.DataCalls, "command": &b.CommandCalls, "wake": &b.WakeCalls}
+	for _, part := range parts[1:] {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		dst, known := fields[key]
+		if !ok || !known {
+			return UsageBaseline{}, fmt.Errorf("config: TESLA_USAGE_BASELINE: unexpected field %q", part)
+		}
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 0 {
+			return UsageBaseline{}, fmt.Errorf("config: TESLA_USAGE_BASELINE %s must be a non-negative integer, got %q", key, value)
+		}
+		*dst = n
+		delete(fields, key)
+	}
+	return b, nil
 }
 
 func envOrDefault(key, fallback string) string {

@@ -702,6 +702,61 @@ func Test_APIUsageTracker_monthReset(t *testing.T) {
 	}
 }
 
+func Test_APIUsageTracker_billingMonth(t *testing.T) {
+	sydney, err := time.LoadLocation("Australia/Sydney")
+	if err != nil {
+		t.Skip("tzdata unavailable:", err)
+	}
+	tests := []struct {
+		name      string
+		start     time.Time
+		later     time.Time
+		wantData  int64
+		wantMonth time.Time
+	}{
+		{
+			name:      "snapshot after rollover reports the new month empty",
+			start:     time.Date(2026, 9, 30, 23, 0, 0, 0, time.UTC),
+			later:     time.Date(2026, 10, 1, 0, 5, 0, 0, time.UTC),
+			wantData:  0,
+			wantMonth: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:      "local midnight on the 1st is still the previous UTC month",
+			start:     time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC),
+			later:     time.Date(2026, 10, 1, 7, 0, 0, 0, sydney),
+			wantData:  2,
+			wantMonth: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := tt.start
+			tracker := newAPIUsageTracker(func() time.Time { return now })
+			tracker.RecordData()
+			tracker.RecordData()
+			now = tt.later
+			snap := tracker.Snapshot()
+			if snap.DataCalls != tt.wantData || !snap.MonthStarted.Equal(tt.wantMonth) {
+				t.Fatalf("snapshot = %d calls in %v, want %d in %v", snap.DataCalls, snap.MonthStarted, tt.wantData, tt.wantMonth)
+			}
+		})
+	}
+}
+
+func Test_APIUsageTracker_SetCountsIgnoresPreviousMonth(t *testing.T) {
+	now := time.Date(2026, 10, 1, 0, 30, 0, 0, time.UTC)
+	tracker := newAPIUsageTracker(func() time.Time { return now })
+	tracker.SetCounts(100, 100, 1, 0, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	if got := tracker.Snapshot().DataCalls; got != 0 {
+		t.Fatalf("DataCalls = %d after restoring September counts, want 0", got)
+	}
+	tracker.SetCounts(100, 100, 1, 0, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+	if got := tracker.Snapshot().DataCalls; got != 100 {
+		t.Fatalf("DataCalls = %d, want 100", got)
+	}
+}
+
 func Test_GetAPIUsage_returnsTrackerSnapshot(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {

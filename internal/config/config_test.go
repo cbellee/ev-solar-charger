@@ -503,3 +503,55 @@ func TestEntraSessionDurations(t *testing.T) {
 		})
 	}
 }
+
+func TestTeslaUsageBaseline(t *testing.T) {
+	at := time.Date(2026, 10, 26, 3, 27, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		raw     string
+		want    *UsageBaseline
+		wantErr bool
+	}{
+		{name: "unset"},
+		{
+			name: "valid",
+			raw:  "2026-10-26T14:27:00+11:00,data=1449,command=1550,wake=19",
+			want: &UsageBaseline{At: at, DataCalls: 1449, CommandCalls: 1550, WakeCalls: 19},
+		},
+		{
+			name: "any field order with spaces",
+			raw:  "2026-10-26T03:27:00Z, wake=19, data=1449, command=1550",
+			want: &UsageBaseline{At: at, DataCalls: 1449, CommandCalls: 1550, WakeCalls: 19},
+		},
+		{name: "missing field", raw: "2026-10-26T03:27:00Z,data=1,command=2", wantErr: true},
+		{name: "duplicate field", raw: "2026-10-26T03:27:00Z,data=1,data=2,wake=3", wantErr: true},
+		{name: "unknown field", raw: "2026-10-26T03:27:00Z,data=1,command=2,sms=3", wantErr: true},
+		{name: "bad time", raw: "26/10/2026,data=1,command=2,wake=3", wantErr: true},
+		{name: "negative", raw: "2026-10-26T03:27:00Z,data=-1,command=2,wake=3", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("TESLA_USAGE_BASELINE", tt.raw)
+			cfg, err := Load()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			got := cfg.TeslaUsageBaseline
+			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
+				t.Fatalf("baseline = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUsageBaselineStringRoundTrips(t *testing.T) {
+	b := UsageBaseline{At: time.Date(2026, 10, 26, 3, 27, 0, 0, time.UTC), DataCalls: 1449, CommandCalls: 1550, WakeCalls: 19}
+	got, err := ParseUsageBaseline(b.String())
+	if err != nil || got != b {
+		t.Fatalf("round trip = %+v, %v; want %+v", got, err, b)
+	}
+}

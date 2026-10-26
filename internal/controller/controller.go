@@ -968,35 +968,16 @@ func (c *Controller) SetRefreshToken(ctx context.Context, refreshToken string) e
 		return nil
 	}
 
-	now := time.Now()
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-	snaps, err := c.store.QueryAPIUsage(ctx, monthStart, now, 100000)
+	restored, found, err := LoadAPIUsage(ctx, c.store, c.cfg.TeslaUsageBaseline, time.Now())
 	if err != nil {
 		if c.logger != nil {
 			c.logger.WarnContext(ctx, "failed to restore api usage after token activation", "error", err)
 		}
 		return nil
 	}
-	if len(snaps) == 0 {
+	if !found {
 		return nil
 	}
-
-	var restored tesla.APIUsage
-	for _, snap := range snaps {
-		if snap.DataCalls > restored.DataCalls {
-			restored.DataCalls = snap.DataCalls
-		}
-		if snap.CommandCalls > restored.CommandCalls {
-			restored.CommandCalls = snap.CommandCalls
-		}
-		if snap.WakeCalls > restored.WakeCalls {
-			restored.WakeCalls = snap.WakeCalls
-		}
-		if snap.StreamSignals > restored.StreamSignals {
-			restored.StreamSignals = snap.StreamSignals
-		}
-	}
-	restored.MonthStarted = monthStart
 
 	if restorer, ok := c.vehicle.(interface{ RestoreAPIUsage(tesla.APIUsage) }); ok {
 		restorer.RestoreAPIUsage(restored)

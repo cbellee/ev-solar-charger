@@ -224,50 +224,21 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 	// 8. Create controller.
 	ctrl := controller.New(inv, vehicle, store, cfg, logger, metrics)
 
-	// 8b. Restore Tesla API usage counters from persisted snapshots in the
-	// current calendar month. Counters are monotonic within a month, so we
-	// take the maximum of each counter across all snapshots — this is
-	// immune to zero snapshots written while the container was in stub
-	// mode (e.g. after a refresh-token expiry) overwriting good values.
+	// 8b. Restore this billing month's Tesla API usage counters, applying
+	// TESLA_USAGE_BASELINE once if it is set for the current month.
 	if restorer, ok := vehicle.(interface{ RestoreAPIUsage(tesla.APIUsage) }); ok {
-		now := time.Now()
-		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-		if snaps, qerr := store.QueryAPIUsage(ctx, monthStart, now, 100000); qerr != nil {
-			logger.Warn("failed to restore api usage from store", "error", qerr)
-		} else if len(snaps) > 0 {
-			var maxData, maxCmd, maxWake, maxStream int64
-			var latest time.Time
-			for _, s := range snaps {
-				if s.DataCalls > maxData {
-					maxData = s.DataCalls
-				}
-				if s.CommandCalls > maxCmd {
-					maxCmd = s.CommandCalls
-				}
-				if s.WakeCalls > maxWake {
-					maxWake = s.WakeCalls
-				}
-				if s.StreamSignals > maxStream {
-					maxStream = s.StreamSignals
-				}
-				if s.Timestamp.After(latest) {
-					latest = s.Timestamp
-				}
-			}
-			restorer.RestoreAPIUsage(tesla.APIUsage{
-				DataCalls:     maxData,
-				CommandCalls:  maxCmd,
-				WakeCalls:     maxWake,
-				StreamSignals: maxStream,
-				MonthStarted:  monthStart,
-			})
+		usage, found, err := controller.LoadAPIUsage(ctx, store, cfg.TeslaUsageBaseline, time.Now())
+		switch {
+		case err != nil:
+			logger.Warn("failed to restore api usage from store", "error", err)
+		case found:
+			restorer.RestoreAPIUsage(usage)
 			logger.Info("restored api usage counters",
-				"data", maxData,
-				"command", maxCmd,
-				"wake", maxWake,
-				"stream", maxStream,
-				"snapshots", len(snaps),
-				"latest_at", latest)
+				"data", usage.DataCalls,
+				"command", usage.CommandCalls,
+				"wake", usage.WakeCalls,
+				"stream", usage.StreamSignals,
+				"month", usage.MonthStarted.Format("2006-01"))
 		}
 	}
 

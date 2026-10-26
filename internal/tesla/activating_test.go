@@ -63,7 +63,7 @@ func Test_ActivatingController_SetRefreshToken_promotesUnavailableController(t *
 	if usage.MonthStarted.IsZero() {
 		t.Fatal("MonthStarted is zero, want current month")
 	}
-	monthStart := time.Date(time.Now().Year(), time.Now().Month(), 1, 0, 0, 0, 0, time.Now().Location())
+	monthStart := BillingMonthStart(time.Now())
 	if !usage.MonthStarted.Equal(monthStart) {
 		t.Fatalf("MonthStarted = %v, want %v", usage.MonthStarted, monthStart)
 	}
