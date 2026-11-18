@@ -73,6 +73,16 @@ does not eliminate the slow background polling cost. Local usage counters do
 not count MQTT deliveries as newly billed signals; use receiver metrics and the
 Tesla Developer Dashboard.
 
+Separately from telemetry hints, each successful automatic or manual charge
+start/stop queues one REST confirmation read on the next controller tick.
+This prevents the pre-command cached state from reporting `monitoring` after
+charging starts or repeatedly issuing stop commands after charging stops.
+The read does not wait for `TESLA_TELEMETRY_REFRESH_MIN_SECONDS`; it is triggered
+by the successful command, not by streamed data. Normal telemetry throttling,
+command cooldowns, and polling intervals remain unchanged. Allow approximately
+$0.002 per successful start/stop for this extra data read at the documented
+rate; see [cost optimisation](cost-optimisation.md).
+
 ## 1. Prepare the NAS
 
 Use the source/image built from the telemetry branch. An older GHCR `latest`

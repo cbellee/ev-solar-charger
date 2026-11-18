@@ -1100,6 +1100,142 @@ func Test_Tick_skipsChargeStart_withinCooldown(t *testing.T) {
 	}
 }
 
+func Test_Tick_confirmsSuccessfulChargeCommands(t *testing.T) {
+	tests := []struct {
+		name        string
+		before      tesla.ChargeState
+		after       tesla.ChargeState
+		beforePower inverter.PowerData
+		afterPower  inverter.PowerData
+		wantState   State
+	}{
+		{
+			name:        "start",
+			before:      tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"},
+			after:       tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Charging", AmpsActual: 15},
+			beforePower: inverter.PowerData{SurplusWatts: 3820, GridWatts: -3820},
+			afterPower:  inverter.PowerData{},
+			wantState:   StateCharging,
+		},
+		{
+			name:        "stop",
+			before:      tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Charging", AmpsActual: 15},
+			after:       tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"},
+			beforePower: inverter.PowerData{GridWatts: 5000},
+			afterPower:  inverter.PowerData{GridWatts: 5000},
+			wantState:   StateMonitoring,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := defaultCfg()
+			cfg.ChargeStartRetry = 5 * time.Minute
+			cfg.TeslaChargingPollInterval = 5 * time.Minute
+			cfg.TeslaIdlePollInterval = 30 * time.Minute
+			cfg.TelemetryRefreshMinInterval = time.Minute
+			cfg.DeadbandPolls = 1
+			inv := &mockInverter{power: tt.beforePower}
+			veh := &mockVehicle{chargeState: tt.before}
+			ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+			ctx := context.Background()
+
+			ctrl.Tick(ctx)
+			commandCount := len(veh.getCalls())
+			if commandCount == 0 {
+				t.Fatal("expected a charging command on the first tick")
+			}
+			veh.chargeState = tt.after
+			inv.power = tt.afterPower
+			ctrl.Tick(ctx)
+			snap := ctrl.GetStateSnapshot()
+			if snap.State != tt.wantState || snap.ChargingState != tt.after.State || snap.ActualAmps != tt.after.AmpsActual {
+				t.Errorf("snapshot still reflects pre-command state: %+v", snap)
+			}
+			if veh.stateCalls != 2 {
+				t.Errorf("vehicle reads = %d, want initial read and one command confirmation", veh.stateCalls)
+			}
+			ctrl.Tick(ctx)
+			if veh.stateCalls != 2 || len(veh.getCalls()) != commandCount {
+				t.Errorf("confirmation caused repeated reads or commands: reads=%d commands=%v", veh.stateCalls, veh.getCalls())
+			}
+		})
+	}
+}
+
+func Test_Tick_chargeConfirmationFailureDoesNotRepeatRead(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.ChargeStartRetry = 5 * time.Minute
+	cfg.CommandFailureBackoff = 5 * time.Minute
+	cfg.TeslaChargingPollInterval = 5 * time.Minute
+	cfg.TeslaIdlePollInterval = 30 * time.Minute
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"}}
+	inv := &mockInverter{power: inverter.PowerData{SurplusWatts: 3820, GridWatts: -3820}}
+	ctrl := newTestControllerWithConfig(inv, veh, &mockStore{}, cfg)
+	ctx := context.Background()
+
+	ctrl.Tick(ctx)
+	veh.stateErr = errors.New("confirmation unavailable")
+	ctrl.Tick(ctx)
+	ctrl.mu.RLock()
+	state := ctrl.state
+	ctrl.mu.RUnlock()
+	if state != StateError || veh.stateCalls != 2 {
+		t.Fatalf("confirmation failure did not enter the error state: reads=%d state=%s", veh.stateCalls, state)
+	}
+	for range 3 {
+		ctrl.Tick(ctx)
+	}
+	if veh.stateCalls != 2 || len(veh.getCalls()) != 2 {
+		t.Fatalf("failed confirmation caused repeated reads or commands: reads=%d commands=%v", veh.stateCalls, veh.getCalls())
+	}
+}
+
+func Test_ManualCommands_confirmOnlySuccessfulChanges(t *testing.T) {
+	for _, action := range []string{"start", "stop"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fail=%t", action, fail), func(t *testing.T) {
+				cfg := defaultCfg()
+				cfg.TeslaChargingPollInterval = 5 * time.Minute
+				cfg.TeslaIdlePollInterval = 30 * time.Minute
+				before, after := "Stopped", "Charging"
+				if action == "stop" {
+					before, after = after, before
+				}
+				veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: before}}
+				ctrl := newTestControllerWithConfig(&mockInverter{}, veh, &mockStore{}, cfg)
+				ctrl.SetMode(ModeManual)
+				ctx := context.Background()
+				ctrl.Tick(ctx)
+				var commandErr error
+				if fail {
+					commandErr = errors.New("command rejected")
+				}
+				veh.startErr, veh.stopErr = commandErr, commandErr
+				command := ctrl.ManualStart
+				if action == "stop" {
+					command = ctrl.ManualStop
+				}
+				if err := command(ctx); !errors.Is(err, commandErr) {
+					t.Fatalf("command error = %v, want %v", err, commandErr)
+				}
+				wantReads, wantState := 1, before
+				if !fail {
+					veh.chargeState.State = after
+					wantReads, wantState = 2, after
+				}
+				ctrl.Tick(ctx)
+				if veh.stateCalls != wantReads || ctrl.GetStateSnapshot().ChargingState != wantState {
+					t.Fatalf("reads=%d snapshot=%+v, want reads=%d state=%s", veh.stateCalls, ctrl.GetStateSnapshot(), wantReads, wantState)
+				}
+				ctrl.Tick(ctx)
+				if veh.stateCalls != wantReads || len(veh.getCalls()) != 1 {
+					t.Fatalf("confirmation repeated: reads=%d commands=%v", veh.stateCalls, veh.getCalls())
+				}
+			})
+		}
+	}
+}
+
 func Test_Tick_backsOffAfterCommandFailure(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.ChargeStartRetry = 0 // isolate failure backoff

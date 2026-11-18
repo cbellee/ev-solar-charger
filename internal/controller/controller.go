@@ -90,16 +90,17 @@ type Controller struct {
 	sessionAmpTotal int64
 	sessionSamples  int
 
-	lastTeslaPoll          time.Time
-	lastWakeAttempt        time.Time
-	lastNonActionableAt    time.Time
-	lastChargeStartAttempt time.Time
-	lastCommandFailure     time.Time
-	lastAmpsAdjustAt       time.Time
-	cachedChargeState      tesla.ChargeState
-	hasCachedState         bool
-	vehicleRefreshPending  bool
-	lastTeslaAttempt       time.Time
+	lastTeslaPoll                  time.Time
+	lastWakeAttempt                time.Time
+	lastNonActionableAt            time.Time
+	lastChargeStartAttempt         time.Time
+	lastCommandFailure             time.Time
+	lastAmpsAdjustAt               time.Time
+	cachedChargeState              tesla.ChargeState
+	hasCachedState                 bool
+	vehicleRefreshPending          bool
+	lastTeslaAttempt               time.Time
+	chargeStateConfirmationPending bool
 
 	OnUpdate func(StateSnapshot)
 }
@@ -203,6 +204,7 @@ func (c *Controller) Tick(ctx context.Context) {
 	if c.shouldPollTesla(power.SurplusWatts) {
 		c.mu.Lock()
 		c.vehicleRefreshPending = false
+		c.chargeStateConfirmationPending = false
 		c.lastTeslaAttempt = time.Now()
 		c.mu.Unlock()
 		fresh, err := c.vehicle.GetChargeState(ctx)
@@ -329,6 +331,7 @@ func (c *Controller) Tick(ctx context.Context) {
 					c.recordCommandFailure()
 					c.transitionTo(ctx, StateError, err.Error())
 				} else {
+					c.requestChargeStateConfirmation()
 					c.transitionTo(ctx, StateCharging, fmt.Sprintf("started at %dA", availableAmps))
 					c.mu.Lock()
 					c.lastChargeAmps = availableAmps
@@ -377,6 +380,7 @@ func (c *Controller) Tick(ctx context.Context) {
 				c.logger.WarnContext(ctx, "stop charging failed", "error", err)
 				c.recordCommandFailure()
 			} else {
+				c.requestChargeStateConfirmation()
 				c.transitionTo(ctx, StateStoppedLowSurplus, "insufficient surplus")
 				c.mu.Lock()
 				c.lastChargeAmps = 0
@@ -659,9 +663,11 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 	hasCache := c.hasCachedState
 	pending := c.vehicleRefreshPending
 	lastAttempt := c.lastTeslaAttempt
+	confirmationPending := c.chargeStateConfirmationPending
 	c.mu.RUnlock()
 
-	if !hasCache {
+	// A successful command needs one fresh read before reusing its pre-command state.
+	if !hasCache || confirmationPending {
 		return true
 	}
 
@@ -699,6 +705,12 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 func (c *Controller) RequestVehicleRefresh() {
 	c.mu.Lock()
 	c.vehicleRefreshPending = true
+	c.mu.Unlock()
+}
+
+func (c *Controller) requestChargeStateConfirmation() {
+	c.mu.Lock()
+	c.chargeStateConfirmationPending = true
 	c.mu.Unlock()
 }
 
@@ -931,7 +943,11 @@ func (c *Controller) ManualStart(ctx context.Context) error {
 	if mode != ModeManual {
 		return fmt.Errorf("controller: manual start requires manual mode")
 	}
-	return c.vehicle.StartCharging(ctx)
+	if err := c.vehicle.StartCharging(ctx); err != nil {
+		return err
+	}
+	c.requestChargeStateConfirmation()
+	return nil
 }
 
 // ManualStop stops charging (manual mode only).
@@ -945,7 +961,11 @@ func (c *Controller) ManualStop(ctx context.Context) error {
 	if mode != ModeManual {
 		return fmt.Errorf("controller: manual stop requires manual mode")
 	}
-	return c.vehicle.StopCharging(ctx)
+	if err := c.vehicle.StopCharging(ctx); err != nil {
+		return err
+	}
+	c.requestChargeStateConfirmation()
+	return nil
 }
 
 // SetChargeLimit sets the vehicle's charge limit (percent). Available in both

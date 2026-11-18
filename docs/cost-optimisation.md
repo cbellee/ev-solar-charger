@@ -35,11 +35,27 @@ The inverter is polled every tick (free, local Modbus call), but Tesla API calls
 | Controller State | Poll Interval | Rationale |
 |------------------|---------------|-----------|
 | First call (no cache) | Immediate | Need initial vehicle state |
+| Successful charge start/stop (automatic or manual) | One confirmation read on the next controller tick | Replace the pre-command cached state before the next control decision |
 | Charging | `TESLA_CHARGING_POLL_SECONDS` (default 300s) | Track battery % and actual amps with lower data-call spend |
 | Idle / Monitoring | `TESLA_IDLE_POLL_SECONDS` (default 1800s) | Catch out-of-band state changes without frequent polling |
 | Wake Pending | `WAKE_RETRY_INTERVAL_SECONDS` (default 300s) | Re-check periodically if the car still has not come online |
 
 Between Tesla API calls, the controller uses `cachedChargeState` so the UI snapshot and state machine continue updating from inverter data.
+
+A successful charge start or stop queues one REST confirmation read, independent
+of the regular polling intervals and telemetry-hint throttle. It does not mark
+the vehicle cache as charging/stopped based on command acceptance alone.
+Otherwise, a cached `Stopped` value can return the dashboard to `monitoring`
+after a successful start, while a cached `Charging` value can trigger repeated
+stop commands after the vehicle has already stopped. Failed commands do not
+queue this confirmation, and a failed confirmation returns to the existing
+polling/backoff rules rather than forcing reads on every tick. Command cooldowns
+remain unchanged.
+
+Budget one additional data request per successful start/stop, approximately
+**$0.002 each** at the documented rate. For example, ten successful starts and
+ten successful stops add up to twenty confirmation reads, or about **$0.04**.
+The estimates below exclude these transition-dependent reads.
 
 The `WakeUp` path also uses a bounded follow-up schedule now: two delayed `vehicle_data` checks across 30 seconds instead of a 2-second polling loop. That caps wake follow-up data usage at two calls per wake attempt.
 
