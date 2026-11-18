@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
@@ -42,6 +44,67 @@ func Test_Migrate_createsTablesIdempotently(t *testing.T) {
 	}
 	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&count); err != nil {
 		t.Fatalf("events table missing: %v", err)
+	}
+}
+
+func Test_VehicleObservation_survivesReopenAndSeparatesVINs(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "vehicle.db")
+	store, err := NewSQLiteStore(dbPath, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	observation := VehicleObservation{
+		VIN: "TEST_VIN", ObservedAt: time.Now().UTC(),
+		ChargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped", BatteryPct: 84.5, ChargeLimit: 100},
+	}
+	if err := store.SaveVehicleObservation(ctx, observation); err != nil {
+		t.Fatal(err)
+	}
+	observation.ChargeState.State = "Complete"
+	observation.ChargeState.BatteryPct = 100
+	if err := store.SaveVehicleObservation(ctx, observation); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = NewSQLiteStore(dbPath, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.LoadVehicleObservation(ctx, observation.VIN)
+	if err != nil || got == nil || *got != observation {
+		t.Fatalf("reopened observation = %+v, error=%v; want %+v", got, err, observation)
+	}
+	other, err := store.LoadVehicleObservation(ctx, "OTHER_VIN")
+	if err != nil || other != nil {
+		t.Fatalf("another vehicle inherited the observation: %+v, %v", other, err)
+	}
+	observation.ChargeState.IsOnline = false
+	if err := store.SaveVehicleObservation(ctx, observation); err == nil {
+		t.Fatal("offline reading overwrote the confirmed observation")
+	}
+	got, err = store.LoadVehicleObservation(ctx, observation.VIN)
+	if err != nil || got == nil || !got.ChargeState.IsOnline {
+		t.Fatalf("offline write erased online observation: %+v, %v", got, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE vehicle_observations SET charge_state = 'invalid'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadVehicleObservation(ctx, observation.VIN); err == nil {
+		t.Fatal("corrupt persisted data was not reported")
 	}
 }
 

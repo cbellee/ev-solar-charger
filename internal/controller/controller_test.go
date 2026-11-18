@@ -1,12 +1,14 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -129,15 +131,40 @@ func (m *mockVehicle) getCalls() []string {
 
 // mockStore implements storage.Store (minimal, for controller tests).
 type mockStore struct {
-	mu            sync.Mutex
-	readings      []storage.Reading
-	events        []storage.Event
-	sessions      []storage.ChargeSession
-	endedSessions []storage.ChargeSession
-	nextID        int64
+	mu             sync.Mutex
+	readings       []storage.Reading
+	events         []storage.Event
+	sessions       []storage.ChargeSession
+	endedSessions  []storage.ChargeSession
+	nextID         int64
+	observation    *storage.VehicleObservation
+	observationErr error
 }
 
 func (m *mockStore) Migrate(ctx context.Context) error { return nil }
+
+func (m *mockStore) SaveVehicleObservation(ctx context.Context, observation storage.VehicleObservation) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.observationErr != nil {
+		return m.observationErr
+	}
+	m.observation = &observation
+	return nil
+}
+
+func (m *mockStore) LoadVehicleObservation(ctx context.Context, vin string) (*storage.VehicleObservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.observationErr != nil {
+		return nil, m.observationErr
+	}
+	if m.observation == nil || m.observation.VIN != vin {
+		return nil, nil
+	}
+	observation := *m.observation
+	return &observation, nil
+}
 
 func (m *mockStore) InsertReading(ctx context.Context, r storage.Reading) error {
 	m.mu.Lock()
@@ -234,6 +261,226 @@ func newTestControllerWithConfig(inv *mockInverter, veh *mockVehicle, store stor
 
 func newTestController(inv *mockInverter, veh *mockVehicle, store storage.Store) *Controller {
 	return newTestControllerWithConfig(inv, veh, store, defaultCfg())
+}
+
+func Test_Tick_startupOfflineRecoversWithoutForceRefresh(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.TeslaIdlePollInterval = 30 * time.Minute
+	veh := &mockVehicle{stateErr: tesla.ErrCarOffline}
+	ctrl := newTestControllerWithConfig(&mockInverter{}, veh, &mockStore{}, cfg)
+	ctx := context.Background()
+	ctrl.Tick(ctx)
+	veh.stateErr = nil
+	veh.chargeState = tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Complete", BatteryPct: 100}
+	ctrl.lastTeslaAttempt = time.Now().Add(-time.Minute)
+	ctrl.Tick(ctx)
+	snap := ctrl.GetStateSnapshot()
+	if veh.stateCalls != 2 || !snap.CarOnline || !snap.CarPluggedIn || snap.BatteryPct != 100 || snap.ChargingState != "Complete" {
+		t.Fatalf("startup recovery did not confirm the car: reads=%d snapshot=%+v", veh.stateCalls, snap)
+	}
+	if calls := veh.getCalls(); len(calls) != 0 {
+		t.Fatalf("passive recovery issued commands: %v", calls)
+	}
+}
+
+func Test_Tick_startupRecoveryBudget(t *testing.T) {
+	for _, readErr := range []error{tesla.ErrCarOffline, nil, errors.New("temporary network failure")} {
+		t.Run(fmt.Sprint(readErr), func(t *testing.T) {
+			cfg := defaultCfg()
+			cfg.TeslaIdlePollInterval = 30 * time.Minute
+			cfg.CommandFailureBackoff = 30 * time.Minute
+			cfg.TelemetryRefreshMinInterval = time.Minute
+			veh := &mockVehicle{
+				stateErr:    readErr,
+				chargeState: tesla.ChargeState{State: "Charging", BatteryPct: 64, AmpsActual: 16},
+			}
+			ctrl := newTestControllerWithConfig(&mockInverter{power: inverter.PowerData{SurplusWatts: 5000}}, veh, &mockStore{}, cfg)
+			ctx := context.Background()
+			ctrl.RequestVehicleRefresh() // Subscription reconciliation can be consumed by the first offline read.
+			ctrl.Tick(ctx)
+			if snap := ctrl.GetStateSnapshot(); snap.VehicleDataStatus != VehicleDataUnknown ||
+				snap.VehicleObservedAt != nil || snap.ChargingState != "" || snap.ActualAmps != 0 {
+				t.Fatalf("unconfirmed offline fields escaped as a vehicle reading: %+v", snap)
+			}
+			wakeCooldown, startCooldown := time.Now(), time.Now()
+			ctrl.lastWakeAttempt, ctrl.lastChargeStartAttempt = wakeCooldown, startCooldown
+			for i, delay := range []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute} {
+				ctrl.lastTeslaAttempt = time.Now().Add(-delay + time.Second)
+				ctrl.Tick(ctx)
+				if veh.stateCalls != i+1 {
+					t.Fatalf("read before recovery delay %v: %d", delay, veh.stateCalls)
+				}
+				ctrl.lastTeslaAttempt = time.Now().Add(-delay)
+				// A coincident telemetry hint shares the last recovery read.
+				if i == 2 {
+					for range 10 {
+						ctrl.RequestVehicleRefresh()
+					}
+				}
+				ctrl.Tick(ctx)
+				if veh.stateCalls != i+2 {
+					t.Fatalf("missing/coalesced retry after %v: reads=%d", delay, veh.stateCalls)
+				}
+			}
+			ctrl.lastTeslaAttempt = time.Now().Add(-10 * time.Minute)
+			for range 10 {
+				ctrl.Tick(ctx)
+			}
+			if veh.stateCalls != 4 {
+				t.Fatalf("startup retry budget exceeded: %d reads", veh.stateCalls)
+			}
+			if !ctrl.lastWakeAttempt.Equal(wakeCooldown) || !ctrl.lastChargeStartAttempt.Equal(startCooldown) {
+				t.Fatal("startup recovery cleared command cooldowns")
+			}
+			if calls := veh.getCalls(); len(calls) != 0 {
+				t.Fatalf("startup recovery issued commands: %v", calls)
+			}
+			ctrl.lastTeslaPoll = time.Now().Add(-31 * time.Minute)
+			ctrl.Tick(ctx)
+			if veh.stateCalls != 5 {
+				t.Fatal("regular polling did not resume after recovery budget")
+			}
+		})
+	}
+}
+
+func Test_Tick_restoresObservationForDisplayOnly(t *testing.T) {
+	for _, state := range []string{"Complete", "Charging", "Stopped", "Disconnected"} {
+		t.Run(state, func(t *testing.T) {
+			cfg := defaultCfg()
+			cfg.TeslaVIN = "TEST_VIN"
+			cfg.TeslaIdlePollInterval = 30 * time.Minute
+			store := &mockStore{}
+			veh := &mockVehicle{chargeState: tesla.ChargeState{
+				IsOnline: true, PluggedIn: state != "Disconnected", State: state,
+				BatteryPct: 100, ChargeLimit: 100, AmpsActual: 16,
+			}}
+			ctx := context.Background()
+			first := newTestControllerWithConfig(&mockInverter{}, veh, store, cfg)
+			first.SetMode(ModeManual)
+			first.Tick(ctx)
+			observedAt := first.GetStateSnapshot().VehicleObservedAt
+			if observedAt == nil || store.observation == nil {
+				t.Fatal("successful read was not persisted")
+			}
+
+			offline := &mockVehicle{stateErr: tesla.ErrCarOffline}
+			restarted := newTestControllerWithConfig(
+				&mockInverter{power: inverter.PowerData{SurplusWatts: 5000}}, offline, store, cfg)
+			for range 10 {
+				restarted.Tick(ctx)
+			}
+			snap := restarted.GetStateSnapshot()
+			if snap.CarOnline || snap.VehicleDataStatus != VehicleDataLastKnown ||
+				snap.VehicleObservedAt == nil || !snap.VehicleObservedAt.Equal(*observedAt) ||
+				snap.BatteryPct != 100 || snap.ChargingState != state || snap.ChargeLimit != 100 ||
+				snap.CarPluggedIn != (state != "Disconnected") {
+				t.Fatalf("lost historical observation after restart: %+v", snap)
+			}
+			if restarted.lastKnownPluggedIn || !restarted.lastOnlineAt.IsZero() || restarted.shouldAttemptWake() {
+				t.Fatal("persisted observation granted wake eligibility")
+			}
+			restarted.lastTeslaAttempt = time.Now().Add(-time.Minute)
+			restarted.Tick(ctx)
+			wantCalls := 2
+			if state == "Complete" {
+				wantCalls = 1
+			}
+			if offline.stateCalls != wantCalls || len(offline.getCalls()) != 0 {
+				t.Fatalf("unsafe restored state: reads=%d commands=%v", offline.stateCalls, offline.getCalls())
+			}
+			if !store.observation.ObservedAt.Equal(*observedAt) {
+				t.Fatal("offline read overwrote the persisted online observation")
+			}
+		})
+	}
+}
+
+func Test_Tick_ignoresIneligibleStoredObservations(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		vin        string
+		age        time.Duration
+		online     bool
+		wantStatus VehicleDataStatus
+	}{
+		{"wrong vehicle", "OTHER_VIN", time.Hour, true, VehicleDataUnknown},
+		{"future timestamp", "TEST_VIN", -time.Hour, true, VehicleDataUnknown},
+		{"offline record", "TEST_VIN", time.Hour, false, VehicleDataUnknown},
+		{"expired complete", "TEST_VIN", 25 * time.Hour, true, VehicleDataLastKnown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultCfg()
+			cfg.TeslaVIN = "TEST_VIN"
+			cfg.TeslaIdlePollInterval = 30 * time.Minute
+			store := &mockStore{observation: &storage.VehicleObservation{
+				VIN: tc.vin, ObservedAt: time.Now().Add(-tc.age),
+				ChargeState: tesla.ChargeState{IsOnline: tc.online, PluggedIn: true, State: "Complete"},
+			}}
+			veh := &mockVehicle{stateErr: tesla.ErrCarOffline}
+			ctrl := newTestControllerWithConfig(&mockInverter{}, veh, store, cfg)
+			ctrl.Tick(context.Background())
+			ctrl.lastTeslaAttempt = time.Now().Add(-time.Minute)
+			ctrl.Tick(context.Background())
+			if ctrl.GetStateSnapshot().VehicleDataStatus != tc.wantStatus || veh.stateCalls != 2 || ctrl.shouldAttemptWake() {
+				t.Fatalf("stored record affected recovery/control: %+v", ctrl.GetStateSnapshot())
+			}
+		})
+	}
+}
+
+func Test_Tick_cachedObservationDoesNotBecomeNew(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.TeslaIdlePollInterval = 30 * time.Minute
+	cfg.TelemetryRefreshMinInterval = time.Minute
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Complete", BatteryPct: 100}}
+	ctrl := newTestControllerWithConfig(&mockInverter{}, veh, &mockStore{}, cfg)
+	ctx := context.Background()
+	ctrl.Tick(ctx)
+	first := ctrl.GetStateSnapshot()
+	lastOnline, lastNonActionable := ctrl.lastOnlineAt, ctrl.lastNonActionableAt
+	for range 3 {
+		ctrl.Tick(ctx)
+	}
+	after := ctrl.GetStateSnapshot()
+	if !after.VehicleObservedAt.Equal(*first.VehicleObservedAt) ||
+		!ctrl.lastOnlineAt.Equal(lastOnline) || !ctrl.lastNonActionableAt.Equal(lastNonActionable) ||
+		!after.LastUpdate.After(first.LastUpdate) {
+		t.Fatal("cached ticks changed vehicle freshness or failed to update solar freshness")
+	}
+	veh.stateErr = tesla.ErrCarOffline
+	ctrl.lastTeslaAttempt = time.Now().Add(-time.Minute)
+	ctrl.RequestVehicleRefresh()
+	ctrl.Tick(ctx)
+	after = ctrl.GetStateSnapshot()
+	if after.CarOnline || after.BatteryPct != 100 || after.VehicleDataStatus != VehicleDataLastKnown ||
+		!after.VehicleObservedAt.Equal(*first.VehicleObservedAt) {
+		t.Fatalf("offline read erased the last confirmed reading: %+v", after)
+	}
+	// Startup recovery stays finished after the first online confirmation.
+	ctrl.lastTeslaAttempt = time.Now().Add(-10 * time.Minute)
+	ctrl.Tick(ctx)
+	if veh.stateCalls != 2 {
+		t.Fatal("offline reading restarted the startup retry budget")
+	}
+}
+
+func Test_Tick_vehiclePersistenceErrorsAreLogged(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.TeslaVIN = "TEST_VIN"
+	store := &mockStore{observationErr: errors.New("database unavailable")}
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, State: "Disconnected"}}
+	var logs bytes.Buffer
+	ctrl := New(&mockInverter{}, veh, store, cfg, slog.New(slog.NewTextHandler(&logs, nil)), nil)
+	ctrl.Tick(context.Background())
+	for _, message := range []string{"failed to restore vehicle observation", "failed to persist vehicle observation"} {
+		if !strings.Contains(logs.String(), message) {
+			t.Fatalf("missing persistence failure %q in %s", message, logs.String())
+		}
+	}
+	if ctrl.GetStateSnapshot().VehicleDataStatus != VehicleDataCurrent {
+		t.Fatal("persistence failure discarded a valid live reading")
+	}
 }
 
 func Test_Tick_telemetryHintConfirmsPlugState(t *testing.T) {

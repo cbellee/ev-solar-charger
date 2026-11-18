@@ -101,6 +101,12 @@ CREATE TABLE IF NOT EXISTS api_usage_snapshots (
     estimated_cost  REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_api_usage_timestamp ON api_usage_snapshots(timestamp);
+
+CREATE TABLE IF NOT EXISTS vehicle_observations (
+    vin          TEXT PRIMARY KEY,
+    observed_at  TEXT NOT NULL,
+    charge_state TEXT NOT NULL
+);
 ` + authSessionsDDL
 	_, err := s.db.ExecContext(ctx, ddl)
 	if err != nil {

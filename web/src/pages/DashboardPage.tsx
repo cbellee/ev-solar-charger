@@ -8,6 +8,7 @@ import { APIUsageCard } from "@/components/APIUsageCard";
 import { ChargeLimitCard } from "@/components/ChargeLimitCard";
 import { MobileDashboard } from "@/components/MobileDashboard";
 import { STATE_BG, formatDurationHours, formatKW, formatTime } from "@/lib/format";
+import { hasVehicleReading, vehicleStatus } from "@/lib/mobileStatus";
 import clsx from "clsx";
 
 export default function DashboardPage() {
@@ -52,8 +53,9 @@ function StatusFooter({ snap }: { snap: StateSnapshot }) {
     <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
       <Stat label="State" value={snap.state} className={clsx("uppercase tracking-wide rounded px-2 py-0.5 inline-block", STATE_BG[snap.state])} />
       <Stat label="Mode" value={snap.mode} />
-      <Stat label="Vehicle" value={snap.carPluggedIn ? (snap.carOnline ? "online" : "offline") : "unplugged"} />
-      <Stat label="Last update" value={formatTime(snap.lastUpdate)} />
+      <Stat label="Vehicle" value={vehicleStatus(snap)} />
+      <Stat label="Solar updated" value={formatTime(snap.lastUpdate)} />
+      <Stat label="Vehicle last confirmed" value={formatTime(snap.vehicleObservedAt ?? "")} />
       {snap.lastError && (
         <div className="col-span-full rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-300">
           <span className="font-medium">Error:</span> {snap.lastError}
@@ -102,16 +104,19 @@ function SolarCard({ snap }: { snap: StateSnapshot }) {
 }
 
 function EVChargingCard({ snap }: { snap: StateSnapshot }) {
+  const known = hasVehicleReading(snap);
+  const historical = snap.vehicleDataStatus === "last_known";
+  const suffix = historical ? " (last known)" : "";
   return (
     <Card title="EV Charging">
       <div className="space-y-1.5 text-sm">
-        <Row k="Plugged in" v={snap.carPluggedIn ? "Yes" : "No"} />
-        <Row k="Charging state" v={snap.chargingState || "—"} />
-        <Row k="Target / Actual" v={`${snap.targetAmps} / ${snap.actualAmps} A`} />
-        <Row k="Battery" v={`${snap.batteryPct.toFixed(0)} %`} />
-        <Row k="Time to limit" v={formatDurationHours(snap.timeToLimitHours)} />
+        <Row k="Plugged in" v={known ? `${snap.carPluggedIn ? "Yes" : "No"}${suffix}` : "Unknown"} />
+        <Row k="Charging state" v={snap.chargingState ? `${snap.chargingState}${suffix}` : "Unknown"} />
+        <Row k="Target / Actual" v={`${snap.targetAmps} / ${snap.carOnline ? snap.actualAmps : "—"} A`} />
+        <Row k="Battery" v={known ? `${snap.batteryPct.toFixed(0)} %${suffix}` : "Unknown"} />
+        <Row k="Time to limit" v={snap.carOnline ? formatDurationHours(snap.timeToLimitHours) : "—"} />
         {snap.chargeLimit > 0 && (
-          <Row k="Charge limit" v={`${snap.chargeLimit} %`} />
+          <Row k="Charge limit" v={`${snap.chargeLimit} %${suffix}`} />
         )}
       </div>
     </Card>

@@ -3,7 +3,17 @@ package storage
 import (
 	"context"
 	"time"
+
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
+
+// VehicleObservation is the last confirmed online reading for a vehicle.
+// It is historical context, not authority to send charging commands.
+type VehicleObservation struct {
+	VIN         string
+	ObservedAt  time.Time
+	ChargeState tesla.ChargeState
+}
 
 // Reading is a 1-minute averaged data point persisted to the database.
 type Reading struct {
@@ -62,6 +72,8 @@ type ReadingFilter struct {
 // Store persists and queries historical solar/charging data.
 type Store interface {
 	Migrate(ctx context.Context) error
+	SaveVehicleObservation(ctx context.Context, observation VehicleObservation) error
+	LoadVehicleObservation(ctx context.Context, vin string) (*VehicleObservation, error)
 	InsertReading(ctx context.Context, r Reading) error
 	QueryReadings(ctx context.Context, f ReadingFilter) ([]Reading, error)
 	StartSession(ctx context.Context, s ChargeSession) (int64, error)

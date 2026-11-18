@@ -83,6 +83,19 @@ command cooldowns, and polling intervals remain unchanged. Allow approximately
 $0.002 per successful start/stop for this extra data read at the documented
 rate; see [cost optimisation](cost-optimisation.md).
 
+On an offline app startup, up to three passive recovery reads wait 1, then 2,
+then 5 minutes between attempts. Successful online confirmation ends recovery;
+a recent saved `Complete` reading skips these accelerated reads when the car
+is offline. Startup telemetry hints share the recovery budget and coalesce with
+due reads. These retries neither clear command cooldowns nor wake the car.
+Budget at most $0.006 extra per startup at the documented data-call rate.
+Normal telemetry throttling and idle/error polling continue afterward.
+
+The dashboard can show a saved per-VIN reading as **last known**, alongside
+**Vehicle last confirmed**, while current availability remains offline.
+Solar updates do not advance that timestamp, and restored data cannot authorize
+charging or waking. See [dashboard and recovery behavior](instructions.md#web-dashboard).
+
 ## 1. Prepare the NAS
 
 Use the source/image built from the telemetry branch. An older GHCR `latest`

@@ -37,6 +37,8 @@ export interface StateSnapshot {
   carPluggedIn: boolean;
   carOnline: boolean;
   chargingState: string;
+  vehicleDataStatus: "unknown" | "current" | "last_known";
+  vehicleObservedAt: string | null;
   consecutiveLow: number;
   consecutiveSurplus: number;
   lastUpdate: string;

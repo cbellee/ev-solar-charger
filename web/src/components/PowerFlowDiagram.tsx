@@ -19,15 +19,17 @@ export function PowerFlowDiagram({ snap }: Props) {
   const isCharging = snap.state === "charging" || snap.actualAmps > 0;
 
   // EV branch only visible when plugged in AND (charging or surplus available).
-  const evVisible = snap.carPluggedIn && (isCharging || surplus > 50);
+  const evVisible = snap.carOnline && snap.carPluggedIn && (isCharging || surplus > 50);
 
-  const evLabel = !snap.carPluggedIn
-    ? "Unplugged"
-    : isCharging
-      ? `${snap.actualAmps} A`
-      : surplus > 50
-        ? `${(surplus / 1000).toFixed(2)} kW available`
-        : "Idle";
+  const evLabel = !snap.carOnline
+    ? "Offline"
+    : !snap.carPluggedIn
+      ? "Unplugged"
+      : isCharging
+        ? `${snap.actualAmps} A`
+        : surplus > 50
+          ? `${(surplus / 1000).toFixed(2)} kW available`
+          : "Idle";
 
   return (
     <div className="relative">
@@ -61,7 +63,7 @@ export function PowerFlowDiagram({ snap }: Props) {
         <Node x={120} y={80} label="Solar" sub={hasPv ? `${(pv / 1000).toFixed(2)} kW` : "0 kW"} color="#fbbf24" image="/images/solar_panels.png" />
         <Node x={300} y={160} label="House" sub={`${(snap.loadWatts / 1000).toFixed(2)} kW`} color="#a78bfa" image="/images/house.png" />
         <Node x={480} y={80} label="Grid" sub={isImporting ? `Import ${(grid / 1000).toFixed(2)} kW` : isExporting ? `Export ${(-grid / 1000).toFixed(2)} kW` : "0 kW"} color={isImporting ? "#ef4444" : "#10b981"} image="/images/electricity_pylon.png" />
-        <Node x={420} y={280} label="EV" sub={evLabel} color={evVisible ? "#3b82f6" : "#6b7280"} image="/images/tesla_ev.png" muted={!snap.carPluggedIn} />
+        <Node x={420} y={280} label="EV" sub={evLabel} color={evVisible ? "#3b82f6" : "#6b7280"} image="/images/tesla_ev.png" muted={!snap.carOnline || !snap.carPluggedIn} />
       </svg>
     </div>
   );

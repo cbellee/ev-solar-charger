@@ -20,7 +20,7 @@ export function ChargeLimitCard({ snap }: Props) {
 
   const [pending, setPending] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const value = pending ?? current;
+  const value = snap.carOnline ? pending ?? current : current;
 
   // Reset pending value once the live snapshot catches up (or drifts to the
   // value we requested), so subsequent external changes are reflected.
@@ -49,7 +49,10 @@ export function ChargeLimitCard({ snap }: Props) {
       <div className="space-y-3">
         <div className="flex items-baseline justify-between">
           <span className="text-2xl font-semibold tabular-nums text-gray-100">
-            {value}%
+            {(snap.carOnline && pending !== null) || snap.chargeLimit > 0 ? `${value}%` : "Unknown"}
+            {snap.vehicleDataStatus === "last_known" && snap.chargeLimit > 0 && (
+              <span className="ml-2 text-xs text-gray-400">(last known)</span>
+            )}
           </span>
           <span className="text-xs text-gray-500">
             range {min}–{max}%
@@ -83,7 +86,7 @@ export function ChargeLimitCard({ snap }: Props) {
         </div>
         {!snap.carOnline && (
           <p className="text-xs text-gray-500">
-            Vehicle offline — limit will apply once the car wakes.
+            Vehicle offline — controls are disabled.
           </p>
         )}
         {snap.testMode && (
