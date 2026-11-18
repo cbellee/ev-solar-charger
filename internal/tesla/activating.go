@@ -99,6 +99,15 @@ func (c *ActivatingController) GetAPIUsage() APIUsage {
 	return c.current().GetAPIUsage()
 }
 
+// GetFleetStatus returns cached diagnostics from the active vehicle client.
+func (c *ActivatingController) GetFleetStatus() (FleetStatus, error) {
+	provider, ok := c.current().(FleetStatusProvider)
+	if !ok {
+		return FleetStatus{}, ErrVehicleUnavailable
+	}
+	return provider.GetFleetStatus()
+}
+
 // RestoreAPIUsage seeds the active Tesla client's usage tracker when a real
 // client is available.
 func (c *ActivatingController) RestoreAPIUsage(u APIUsage) {

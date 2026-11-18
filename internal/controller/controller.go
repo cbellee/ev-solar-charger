@@ -98,6 +98,8 @@ type Controller struct {
 	lastAmpsAdjustAt       time.Time
 	cachedChargeState      tesla.ChargeState
 	hasCachedState         bool
+	vehicleRefreshPending  bool
+	lastTeslaAttempt       time.Time
 
 	OnUpdate func(StateSnapshot)
 }
@@ -199,6 +201,10 @@ func (c *Controller) Tick(ctx context.Context) {
 	// the controller state warrants it, using cached state for intermediate ticks.
 	chargeState := c.getCachedChargeState()
 	if c.shouldPollTesla(power.SurplusWatts) {
+		c.mu.Lock()
+		c.vehicleRefreshPending = false
+		c.lastTeslaAttempt = time.Now()
+		c.mu.Unlock()
 		fresh, err := c.vehicle.GetChargeState(ctx)
 		if err != nil {
 			if err == tesla.ErrCarOffline {
@@ -651,6 +657,8 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 	state := c.state
 	lastPoll := c.lastTeslaPoll
 	hasCache := c.hasCachedState
+	pending := c.vehicleRefreshPending
+	lastAttempt := c.lastTeslaAttempt
 	c.mu.RUnlock()
 
 	if !hasCache {
@@ -658,6 +666,9 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 	}
 
 	now := time.Now()
+	if pending && now.Sub(lastAttempt) >= c.cfg.TelemetryRefreshMinInterval {
+		return true
+	}
 	switch state {
 	case StateCharging:
 		return now.Sub(lastPoll) >= c.cfg.TeslaChargingPollInterval
@@ -681,6 +692,14 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 		// while the car silently draws from the grid.
 		return now.Sub(lastPoll) >= c.cfg.TeslaIdlePollInterval
 	}
+}
+
+// RequestVehicleRefresh queues a rate-limited read on a normal controller tick.
+// Telemetry hints never supply vehicle state or clear command/wake cooldowns.
+func (c *Controller) RequestVehicleRefresh() {
+	c.mu.Lock()
+	c.vehicleRefreshPending = true
+	c.mu.Unlock()
 }
 
 func (c *Controller) getCachedChargeState() tesla.ChargeState {
@@ -952,6 +971,15 @@ func (c *Controller) GetStateSnapshot() StateSnapshot {
 // GetAPIUsage returns the current Tesla API usage stats.
 func (c *Controller) GetAPIUsage() tesla.APIUsage {
 	return c.vehicle.GetAPIUsage()
+}
+
+// GetFleetStatus returns cached vehicle capabilities without polling Tesla.
+func (c *Controller) GetFleetStatus() (tesla.FleetStatus, error) {
+	provider, ok := c.vehicle.(tesla.FleetStatusProvider)
+	if !ok {
+		return tesla.FleetStatus{}, tesla.ErrVehicleUnavailable
+	}
+	return provider.GetFleetStatus()
 }
 
 // SetRefreshToken activates or updates the underlying Tesla controller.

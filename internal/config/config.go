@@ -32,6 +32,8 @@ type Config struct {
 	TeslaCommandBase              string
 	TeslaProxyCAFile              string
 	TeslaTestMode                 bool
+	TelemetryMQTTURL              string
+	TelemetryRefreshMinInterval   time.Duration
 	PollInterval                  time.Duration
 	MinChargeAmps                 int
 	MaxChargeAmps                 int
@@ -132,6 +134,31 @@ func Load() (Config, error) {
 	cfg.TeslaProxyCAFile = envOrDefault("TESLA_PROXY_CA_FILE", "")
 	cfg.TeslaRedirectURI = envOrDefault("TESLA_REDIRECT_URI", "")
 	cfg.TeslaScope = envOrDefault("TESLA_SCOPE", "openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds")
+	cfg.TelemetryMQTTURL = os.Getenv("TESLA_TELEMETRY_MQTT_URL")
+	if cfg.TelemetryMQTTURL != "" {
+		broker, err := url.Parse(cfg.TelemetryMQTTURL)
+		if err != nil || broker.Hostname() == "" || (broker.Scheme != "tcp" && broker.Scheme != "ssl") ||
+			broker.User != nil || broker.Path != "" || broker.RawQuery != "" || broker.Fragment != "" {
+			return Config{}, fmt.Errorf("config: TESLA_TELEMETRY_MQTT_URL must be a tcp:// or ssl:// broker URL without credentials, path, query, or fragment")
+		}
+		if broker.Port() != "" {
+			port, err := strconv.Atoi(broker.Port())
+			if err != nil {
+				return Config{}, fmt.Errorf("config: invalid telemetry MQTT port")
+			}
+			if err := validatePort("TESLA_TELEMETRY_MQTT_URL port", port); err != nil {
+				return Config{}, err
+			}
+		}
+	}
+	telemetryRefreshSec, err := envInt("TESLA_TELEMETRY_REFRESH_MIN_SECONDS", 60)
+	if err != nil {
+		return Config{}, err
+	}
+	if telemetryRefreshSec < 1 {
+		return Config{}, fmt.Errorf("config: TESLA_TELEMETRY_REFRESH_MIN_SECONDS must be >= 1")
+	}
+	cfg.TelemetryRefreshMinInterval = time.Duration(telemetryRefreshSec) * time.Second
 
 	// Tesla OAuth credentials are required regardless of test mode so the
 	// /auth/tesla bootstrap flow can run before TESLA_TEST_MODE is disabled.
@@ -177,6 +204,9 @@ func Load() (Config, error) {
 		}
 	} else {
 		cfg.TeslaVIN = envOrDefault("TESLA_VIN", "")
+	}
+	if cfg.TelemetryMQTTURL != "" && (cfg.TeslaVIN == "" || strings.ContainsAny(cfg.TeslaVIN, "/+# \t\r\n")) {
+		return Config{}, fmt.Errorf("config: telemetry requires a TESLA_VIN without MQTT topic separators or wildcards")
 	}
 
 	pollSec, err := envInt("POLL_INTERVAL_SECONDS", 10)

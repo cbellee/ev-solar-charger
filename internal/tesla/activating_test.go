@@ -3,6 +3,7 @@ package tesla
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"testing"
@@ -38,6 +39,7 @@ func Test_ActivatingController_SetRefreshToken_promotesUnavailableController(t *
 		if cfg.TeslaRefreshToken != "incoming-refresh" {
 			t.Fatalf("factory refresh token = %q, want %q", cfg.TeslaRefreshToken, "incoming-refresh")
 		}
+
 		return client, nil
 	}
 
@@ -71,5 +73,33 @@ func Test_ActivatingController_SetRefreshToken_promotesUnavailableController(t *
 	// Ensure the active controller was promoted to a real Tesla client.
 	if _, ok := activating.current().(*TeslaClient); !ok {
 		t.Fatal("active controller was not promoted to *TeslaClient")
+	}
+}
+
+func Test_ActivatingController_GetFleetStatus(t *testing.T) {
+	client, _ := newTestClient(t, http.NotFoundHandler(), defaultAuthHandler())
+	client.fleetStatus = FleetStatus{FleetTelemetryVersion: "1.0"}
+	tests := []struct {
+		name        string
+		active      VehicleController
+		unavailable bool
+	}{
+		{name: "active", active: client},
+		{name: "unavailable", active: NewUnavailableController("not authenticated"), unavailable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := NewActivatingController(config.Config{}, testLogger(), nil, tt.active)
+			status, err := wrapped.GetFleetStatus()
+			if tt.unavailable {
+				if !errors.Is(err, ErrVehicleUnavailable) {
+					t.Fatalf("GetFleetStatus error = %v, want ErrVehicleUnavailable", err)
+				}
+				return
+			}
+			if err != nil || status.FleetTelemetryVersion != "1.0" {
+				t.Fatalf("GetFleetStatus = %+v, %v", status, err)
+			}
+		})
 	}
 }

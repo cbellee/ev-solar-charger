@@ -1,0 +1,16 @@
+{
+  "vins": ["REPLACE_WITH_CONFIGURED_VIN"],
+  "config": {
+    "hostname": "telemetry.ev.bellee.net",
+    "port": 8443,
+    "ca": "REPLACE_WITH_THE_PEM_CA_CHAIN_VALIDATED_AGAINST_THE_RECEIVER",
+    "fields": {
+      "DetailedChargeState": {
+        "interval_seconds": 10
+      },
+      "ChargePortLatch": {
+        "interval_seconds": 10
+      }
+    }
+  }
+}

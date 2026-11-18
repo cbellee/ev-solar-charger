@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/cbellee/ev-solar-charger/internal/config"
+	"github.com/cbellee/ev-solar-charger/internal/controller"
+	"github.com/cbellee/ev-solar-charger/internal/tesla"
 )
 
 func oauthTestConfig() config.Config {
@@ -70,6 +72,55 @@ func Test_NewServer_allowsProtectedRoutesWithAuth(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+}
+
+type fleetStatusVehicle struct {
+	nullVehicle
+}
+
+func (v *fleetStatusVehicle) GetFleetStatus() (tesla.FleetStatus, error) {
+	return tesla.FleetStatus{
+		FleetTelemetryVersion: "1.0",
+		LastError:             "fleet status refresh failed; see server logs",
+	}, nil
+}
+
+func Test_NewServer_telemetryStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		auth       Authenticator
+		vehicle    tesla.VehicleController
+		wantStatus int
+	}{
+		{name: "requires authentication", auth: denyAuth, vehicle: &fleetStatusVehicle{}, wantStatus: http.StatusUnauthorized},
+		{name: "cached diagnostics", auth: NoopAuthenticator{}, vehicle: &fleetStatusVehicle{}, wantStatus: http.StatusOK},
+		{name: "unavailable vehicle", auth: NoopAuthenticator{}, vehicle: &nullVehicle{}, wantStatus: http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := controller.New(&nullInverter{}, tt.vehicle, nil, defaultTestCfg(), nil, nil)
+			handler := NewServer(ctrl, &nullStore{}, NewHub(nil), nil, tt.auth, oauthTestConfig())
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/telemetry/status", nil))
+			if w.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tt.wantStatus, w.Body)
+			}
+			if w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("telemetry diagnostics must not be cached by the browser")
+			}
+			if tt.wantStatus != http.StatusOK {
+				return
+			}
+			var status tesla.FleetStatus
+			if err := json.NewDecoder(w.Body).Decode(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status.FleetTelemetryVersion != "1.0" || status.LastError == "" {
+				t.Fatalf("cached diagnostics were not preserved: %+v", status)
+			}
+		})
 	}
 }
 

@@ -60,6 +60,7 @@ type mockVehicle struct {
 	mu          sync.Mutex
 	chargeState tesla.ChargeState
 	stateErr    error
+	stateCalls  int
 	calls       []string
 	setAmpsErr  error
 	setLimitErr error
@@ -71,6 +72,7 @@ type mockVehicle struct {
 func (m *mockVehicle) GetChargeState(ctx context.Context) (tesla.ChargeState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stateCalls++
 	return m.chargeState, m.stateErr
 }
 
@@ -232,6 +234,70 @@ func newTestControllerWithConfig(inv *mockInverter, veh *mockVehicle, store stor
 
 func newTestController(inv *mockInverter, veh *mockVehicle, store storage.Store) *Controller {
 	return newTestControllerWithConfig(inv, veh, store, defaultCfg())
+}
+
+func Test_Tick_telemetryHintConfirmsPlugState(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.TeslaIdlePollInterval = 30 * time.Minute
+	cfg.TelemetryRefreshMinInterval = time.Minute
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true, State: "Disconnected"}}
+	ctrl := newTestControllerWithConfig(&mockInverter{}, veh, &mockStore{}, cfg)
+	ctx := context.Background()
+	ctrl.Tick(ctx)
+	veh.chargeState = tesla.ChargeState{IsOnline: true, PluggedIn: true, State: "Stopped"}
+	ctrl.Tick(ctx)
+	if ctrl.GetStateSnapshot().CarPluggedIn {
+		t.Fatal("normal tick unexpectedly bypassed the idle poll interval")
+	}
+	ctrl.mu.Lock()
+	ctrl.lastTeslaAttempt = time.Now().Add(-time.Minute)
+	lastWake := time.Now()
+	ctrl.lastWakeAttempt = lastWake
+	ctrl.mu.Unlock()
+	for range 10 {
+		ctrl.RequestVehicleRefresh()
+	}
+	ctrl.Tick(ctx)
+	if !ctrl.GetStateSnapshot().CarPluggedIn || veh.stateCalls != 2 {
+		t.Fatalf("hint did not confirm plug-in via REST: calls=%d snapshot=%+v", veh.stateCalls, ctrl.GetStateSnapshot())
+	}
+	if !ctrl.lastWakeAttempt.Equal(lastWake) {
+		t.Fatal("telemetry hint cleared the wake cooldown")
+	}
+	veh.chargeState = tesla.ChargeState{IsOnline: true, State: "Disconnected"}
+	ctrl.RequestVehicleRefresh()
+	ctrl.Tick(ctx)
+	if !ctrl.GetStateSnapshot().CarPluggedIn || veh.stateCalls != 2 {
+		t.Fatal("hint bypassed the minimum refresh interval")
+	}
+	ctrl.mu.Lock()
+	ctrl.lastTeslaAttempt = time.Now().Add(-time.Minute)
+	ctrl.mu.Unlock()
+	ctrl.Tick(ctx)
+	if ctrl.GetStateSnapshot().CarPluggedIn || veh.stateCalls != 3 {
+		t.Fatal("pending hint did not confirm unplugging after the cooldown")
+	}
+}
+
+func Test_Tick_telemetryFailureKeepsBoundedPolling(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.TeslaIdlePollInterval = 30 * time.Minute
+	cfg.CommandFailureBackoff = 5 * time.Minute
+	cfg.TelemetryRefreshMinInterval = time.Minute
+	veh := &mockVehicle{chargeState: tesla.ChargeState{IsOnline: true}}
+	ctrl := newTestControllerWithConfig(&mockInverter{}, veh, &mockStore{}, cfg)
+	ctrl.Tick(context.Background())
+	ctrl.mu.Lock()
+	ctrl.lastTeslaAttempt = time.Now().Add(-time.Minute)
+	ctrl.mu.Unlock()
+	veh.stateErr = errors.New("temporary data failure")
+	ctrl.RequestVehicleRefresh()
+	ctrl.Tick(context.Background())
+	ctrl.RequestVehicleRefresh()
+	ctrl.Tick(context.Background())
+	if veh.stateCalls != 2 {
+		t.Fatalf("failed refresh was retried too quickly: %d reads", veh.stateCalls)
+	}
 }
 
 func Test_Tick_idleCarNotPluggedHighSurplus(t *testing.T) {

@@ -68,6 +68,44 @@ func TestSungrowPasswordFile(t *testing.T) {
 	}
 }
 
+func TestTelemetryConfiguration(t *testing.T) {
+	tests := []struct {
+		name     string
+		broker   string
+		interval string
+		bad      bool
+	}{
+		{name: "disabled"},
+		{name: "private broker", broker: "tcp://telemetry-mqtt:1883"},
+		{name: "TLS broker", broker: "ssl://broker.example:8883"},
+		{name: "wrong scheme", broker: "http://broker:1883", bad: true},
+		{name: "no host", broker: "tcp://", bad: true},
+		{name: "invalid port", broker: "tcp://broker:65536", bad: true},
+		{name: "credentials", broker: "tcp://user:password@broker:1883", bad: true},
+		{name: "wildcard path", broker: "tcp://broker:1883/#", bad: true},
+		{name: "invalid interval", interval: "0", bad: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("TESLA_TELEMETRY_MQTT_URL", tt.broker)
+			t.Setenv("TESLA_TELEMETRY_REFRESH_MIN_SECONDS", tt.interval)
+			_, err := Load()
+			if (err != nil) != tt.bad {
+				t.Fatalf("Load error = %v, want error %v", err, tt.bad)
+			}
+		})
+	}
+	t.Run("VIN topic wildcard", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("TESLA_TELEMETRY_MQTT_URL", "tcp://broker:1883")
+		t.Setenv("TESLA_VIN", "+")
+		if _, err := Load(); err == nil {
+			t.Fatal("expected a wildcard VIN to be rejected")
+		}
+	})
+}
+
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("SUNGROW_HOST", "192.168.1.100")
