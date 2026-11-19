@@ -24,7 +24,13 @@ import (
 
 type fakeStore struct{}
 
-func (fakeStore) Migrate(ctx context.Context) error                          { return nil }
+func (fakeStore) Migrate(ctx context.Context) error { return nil }
+func (fakeStore) SaveVehicleObservation(ctx context.Context, observation storage.VehicleObservation) error {
+	return nil
+}
+func (fakeStore) LoadVehicleObservation(ctx context.Context, vin string) (*storage.VehicleObservation, error) {
+	return nil, nil
+}
 func (fakeStore) InsertReading(ctx context.Context, r storage.Reading) error { return nil }
 func (fakeStore) QueryReadings(ctx context.Context, f storage.ReadingFilter) ([]storage.Reading, error) {
 	return nil, nil

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -38,29 +39,42 @@ const (
 	ModeManual Mode = "manual"
 )
 
+// VehicleDataStatus distinguishes confirmed readings from historical or absent data.
+type VehicleDataStatus string
+
+const (
+	VehicleDataUnknown   VehicleDataStatus = "unknown"
+	VehicleDataCurrent   VehicleDataStatus = "current"
+	VehicleDataLastKnown VehicleDataStatus = "last_known"
+)
+
+var startupRecoveryDelays = [...]time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute}
+
 // StateSnapshot is a point-in-time snapshot for the web UI.
 type StateSnapshot struct {
-	State              State     `json:"state"`
-	Mode               Mode      `json:"mode"`
-	TestMode           bool      `json:"testMode"`
-	PVWatts            float64   `json:"pvWatts"`
-	GridWatts          float64   `json:"gridWatts"`
-	LoadWatts          float64   `json:"loadWatts"`
-	SurplusWatts       float64   `json:"surplusWatts"`
-	TargetAmps         int       `json:"targetAmps"`
-	ActualAmps         int       `json:"actualAmps"`
-	BatteryPct         float64   `json:"batteryPct"`
-	TimeToLimitHours   float64   `json:"timeToLimitHours"`
-	ChargeLimit        int       `json:"chargeLimit"`
-	ChargeLimitMin     int       `json:"chargeLimitMin"`
-	ChargeLimitMax     int       `json:"chargeLimitMax"`
-	CarPluggedIn       bool      `json:"carPluggedIn"`
-	CarOnline          bool      `json:"carOnline"`
-	ChargingState      string    `json:"chargingState"`
-	ConsecutiveLow     int       `json:"consecutiveLow"`
-	ConsecutiveSurplus int       `json:"consecutiveSurplus"`
-	LastUpdate         time.Time `json:"lastUpdate"`
-	LastError          string    `json:"lastError"`
+	State              State             `json:"state"`
+	Mode               Mode              `json:"mode"`
+	TestMode           bool              `json:"testMode"`
+	PVWatts            float64           `json:"pvWatts"`
+	GridWatts          float64           `json:"gridWatts"`
+	LoadWatts          float64           `json:"loadWatts"`
+	SurplusWatts       float64           `json:"surplusWatts"`
+	TargetAmps         int               `json:"targetAmps"`
+	ActualAmps         int               `json:"actualAmps"`
+	BatteryPct         float64           `json:"batteryPct"`
+	TimeToLimitHours   float64           `json:"timeToLimitHours"`
+	ChargeLimit        int               `json:"chargeLimit"`
+	ChargeLimitMin     int               `json:"chargeLimitMin"`
+	ChargeLimitMax     int               `json:"chargeLimitMax"`
+	CarPluggedIn       bool              `json:"carPluggedIn"`
+	CarOnline          bool              `json:"carOnline"`
+	ChargingState      string            `json:"chargingState"`
+	VehicleDataStatus  VehicleDataStatus `json:"vehicleDataStatus"`
+	VehicleObservedAt  *time.Time        `json:"vehicleObservedAt"`
+	ConsecutiveLow     int               `json:"consecutiveLow"`
+	ConsecutiveSurplus int               `json:"consecutiveSurplus"`
+	LastUpdate         time.Time         `json:"lastUpdate"`
+	LastError          string            `json:"lastError"`
 }
 
 // Controller manages the solar-to-EV charging logic.
@@ -72,6 +86,7 @@ type Controller struct {
 	logger   *slog.Logger
 	metrics  *observability.Metrics
 
+	tickMu             sync.Mutex
 	mu                 sync.RWMutex
 	state              State
 	mode               Mode
@@ -90,14 +105,21 @@ type Controller struct {
 	sessionAmpTotal int64
 	sessionSamples  int
 
-	lastTeslaPoll          time.Time
-	lastWakeAttempt        time.Time
-	lastNonActionableAt    time.Time
-	lastChargeStartAttempt time.Time
-	lastCommandFailure     time.Time
-	lastAmpsAdjustAt       time.Time
-	cachedChargeState      tesla.ChargeState
-	hasCachedState         bool
+	lastTeslaPoll                  time.Time
+	lastWakeAttempt                time.Time
+	lastNonActionableAt            time.Time
+	lastChargeStartAttempt         time.Time
+	lastCommandFailure             time.Time
+	lastAmpsAdjustAt               time.Time
+	cachedChargeState              tesla.ChargeState
+	hasCachedState                 bool
+	vehicleRefreshPending          bool
+	lastTeslaAttempt               time.Time
+	chargeStateConfirmationPending bool
+	vehicleObservationRestored     bool
+	lastVehicleObservation         *storage.VehicleObservation
+	startupReadAttempts            int
+	startupRecoveryDone            bool
 
 	OnUpdate func(StateSnapshot)
 }
@@ -127,9 +149,10 @@ func New(inv inverter.InverterReader, veh tesla.VehicleController, store storage
 		state:    StateIdle,
 		mode:     ModeAuto,
 		snapshot: StateSnapshot{
-			State:    StateIdle,
-			Mode:     ModeAuto,
-			TestMode: cfg.TeslaTestMode,
+			State:             StateIdle,
+			Mode:              ModeAuto,
+			TestMode:          cfg.TeslaTestMode,
+			VehicleDataStatus: VehicleDataUnknown,
 		},
 	}
 }
@@ -159,6 +182,12 @@ func (c *Controller) Run(ctx context.Context) {
 
 // Tick performs one iteration of the control loop.
 func (c *Controller) Tick(ctx context.Context) {
+	c.tickMu.Lock()
+	defer c.tickMu.Unlock()
+	c.tick(ctx)
+}
+
+func (c *Controller) tick(ctx context.Context) {
 	ctx, span := tracer.Start(ctx, "controller.Tick")
 	defer span.End()
 	start := time.Now()
@@ -189,6 +218,8 @@ func (c *Controller) Tick(ctx context.Context) {
 		return
 	}
 
+	c.restoreVehicleObservation(ctx)
+
 	// Auto-clear StateError after the failure backoff has elapsed so the
 	// controller re-evaluates from a clean slate. Without this, the error
 	// state is sticky and hides the cause from the user.
@@ -199,20 +230,35 @@ func (c *Controller) Tick(ctx context.Context) {
 	// the controller state warrants it, using cached state for intermediate ticks.
 	chargeState := c.getCachedChargeState()
 	if c.shouldPollTesla(power.SurplusWatts) {
+		c.mu.Lock()
+		c.vehicleRefreshPending = false
+		c.chargeStateConfirmationPending = false
+		c.lastTeslaAttempt = time.Now()
+		if !c.startupRecoveryDone {
+			c.startupReadAttempts++
+		}
+		c.mu.Unlock()
 		fresh, err := c.vehicle.GetChargeState(ctx)
-		if err != nil {
-			if err == tesla.ErrCarOffline {
-				fresh = tesla.ChargeState{IsOnline: false}
-			} else {
-				c.logger.ErrorContext(ctx, "tesla read failed", "error", err)
-				c.transitionTo(ctx, StateError, err.Error())
-				return
-			}
+		if err != nil || !fresh.IsOnline {
+			fresh = tesla.ChargeState{IsOnline: false}
 		}
 		chargeState = fresh
 		c.setCachedChargeState(fresh)
+		c.observeVehicleRead(ctx, fresh)
+		if err != nil && !errors.Is(err, tesla.ErrCarOffline) {
+			c.logger.ErrorContext(ctx, "tesla read failed", "error", err)
+			c.transitionTo(ctx, StateError, err.Error())
+			c.resetCounters()
+			c.updateSnapshot(power, chargeState, 0)
+			c.mu.Lock()
+			c.snapshot.LastError = err.Error()
+			c.mu.Unlock()
+			if c.OnUpdate != nil {
+				c.OnUpdate(c.GetStateSnapshot())
+			}
+			return
+		}
 	}
-	c.updateKnownPlugState(chargeState)
 	c.recordSessionSample(chargeState)
 
 	// Step 3: Check preconditions.
@@ -323,6 +369,7 @@ func (c *Controller) Tick(ctx context.Context) {
 					c.recordCommandFailure()
 					c.transitionTo(ctx, StateError, err.Error())
 				} else {
+					c.requestChargeStateConfirmation()
 					c.transitionTo(ctx, StateCharging, fmt.Sprintf("started at %dA", availableAmps))
 					c.mu.Lock()
 					c.lastChargeAmps = availableAmps
@@ -371,6 +418,7 @@ func (c *Controller) Tick(ctx context.Context) {
 				c.logger.WarnContext(ctx, "stop charging failed", "error", err)
 				c.recordCommandFailure()
 			} else {
+				c.requestChargeStateConfirmation()
 				c.transitionTo(ctx, StateStoppedLowSurplus, "insufficient surplus")
 				c.mu.Lock()
 				c.lastChargeAmps = 0
@@ -651,13 +699,26 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 	state := c.state
 	lastPoll := c.lastTeslaPoll
 	hasCache := c.hasCachedState
+	pending := c.vehicleRefreshPending
+	lastAttempt := c.lastTeslaAttempt
+	confirmationPending := c.chargeStateConfirmationPending
+	startupAttempts := c.startupReadAttempts
+	startupDone := c.startupRecoveryDone
 	c.mu.RUnlock()
 
-	if !hasCache {
+	// A successful command needs one fresh read before reusing its pre-command state.
+	if !hasCache || confirmationPending {
 		return true
 	}
 
 	now := time.Now()
+	if pending && now.Sub(lastAttempt) >= c.cfg.TelemetryRefreshMinInterval {
+		return true
+	}
+	if !startupDone && startupAttempts > 0 && startupAttempts <= len(startupRecoveryDelays) &&
+		now.Sub(lastAttempt) >= startupRecoveryDelays[startupAttempts-1] {
+		return true
+	}
 	switch state {
 	case StateCharging:
 		return now.Sub(lastPoll) >= c.cfg.TeslaChargingPollInterval
@@ -674,13 +735,27 @@ func (c *Controller) shouldPollTesla(surplusWatts float64) bool {
 		}
 		return now.Sub(lastPoll) >= c.cfg.TeslaIdlePollInterval
 	default:
-		// Always poll on the idle interval (default 5 min) so we detect
+		// Always poll on the idle interval (default 30 min) so we detect
 		// out-of-band state changes — e.g. the user starts a charge from
 		// the Tesla app, or a scheduled charge fires. Without this, a
 		// cached "Stopped" state can keep us from ever issuing StopCharging
 		// while the car silently draws from the grid.
 		return now.Sub(lastPoll) >= c.cfg.TeslaIdlePollInterval
 	}
+}
+
+// RequestVehicleRefresh queues a rate-limited read on a normal controller tick.
+// Telemetry hints never supply vehicle state or clear command/wake cooldowns.
+func (c *Controller) RequestVehicleRefresh() {
+	c.mu.Lock()
+	c.vehicleRefreshPending = true
+	c.mu.Unlock()
+}
+
+func (c *Controller) requestChargeStateConfirmation() {
+	c.mu.Lock()
+	c.chargeStateConfirmationPending = true
+	c.mu.Unlock()
 }
 
 func (c *Controller) getCachedChargeState() tesla.ChargeState {
@@ -695,6 +770,62 @@ func (c *Controller) setCachedChargeState(cs tesla.ChargeState) {
 	c.cachedChargeState = cs
 	c.hasCachedState = true
 	c.lastTeslaPoll = time.Now()
+}
+
+func (c *Controller) restoreVehicleObservation(ctx context.Context) {
+	c.mu.Lock()
+	if c.vehicleObservationRestored {
+		c.mu.Unlock()
+		return
+	}
+	c.vehicleObservationRestored = true
+	c.mu.Unlock()
+	if c.store == nil || c.cfg.TeslaVIN == "" {
+		return
+	}
+	observation, err := c.store.LoadVehicleObservation(ctx, c.cfg.TeslaVIN)
+	if err != nil {
+		c.logger.ErrorContext(ctx, "failed to restore vehicle observation", "error", err)
+		return
+	}
+	if observation == nil {
+		return
+	}
+	if observation.VIN != c.cfg.TeslaVIN || observation.ObservedAt.IsZero() ||
+		observation.ObservedAt.After(time.Now()) || !observation.ChargeState.IsOnline {
+		c.logger.WarnContext(ctx, "ignoring invalid stored vehicle observation")
+		return
+	}
+	// Restored data is display-only: never populate the control cache or wake eligibility.
+	c.mu.Lock()
+	c.lastVehicleObservation = observation
+	c.mu.Unlock()
+}
+
+func (c *Controller) observeVehicleRead(ctx context.Context, cs tesla.ChargeState) {
+	if !cs.IsOnline {
+		c.mu.Lock()
+		previous := c.lastVehicleObservation
+		if previous != nil && previous.ChargeState.State == "Complete" &&
+			c.cfg.PluggedInStaleAfter > 0 && time.Since(previous.ObservedAt) < c.cfg.PluggedInStaleAfter {
+			c.startupRecoveryDone = true
+		}
+		c.mu.Unlock()
+		return
+	}
+	observation := storage.VehicleObservation{
+		VIN: c.cfg.TeslaVIN, ObservedAt: time.Now(), ChargeState: cs,
+	}
+	c.updateKnownPlugState(cs)
+	c.mu.Lock()
+	c.lastVehicleObservation = &observation
+	c.startupRecoveryDone = true
+	c.mu.Unlock()
+	if c.store != nil && observation.VIN != "" {
+		if err := c.store.SaveVehicleObservation(ctx, observation); err != nil {
+			c.logger.ErrorContext(ctx, "failed to persist vehicle observation", "error", err)
+		}
+	}
 }
 
 func (c *Controller) recordSessionSample(cs tesla.ChargeState) {
@@ -745,6 +876,18 @@ func (c *Controller) resetCounters() {
 func (c *Controller) updateSnapshot(power inverter.PowerData, cs tesla.ChargeState, targetAmps int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	dataStatus := VehicleDataUnknown
+	var observedAt *time.Time
+	if observation := c.lastVehicleObservation; observation != nil {
+		timestamp := observation.ObservedAt
+		observedAt = &timestamp
+		dataStatus = VehicleDataCurrent
+		if !cs.IsOnline {
+			dataStatus = VehicleDataLastKnown
+			cs = observation.ChargeState
+			cs.IsOnline = false
+		}
+	}
 	c.snapshot = StateSnapshot{
 		State:              c.state,
 		Mode:               c.mode,
@@ -763,6 +906,8 @@ func (c *Controller) updateSnapshot(power inverter.PowerData, cs tesla.ChargeSta
 		CarPluggedIn:       cs.PluggedIn,
 		CarOnline:          cs.IsOnline,
 		ChargingState:      cs.State,
+		VehicleDataStatus:  dataStatus,
+		VehicleObservedAt:  observedAt,
 		ConsecutiveLow:     c.consecutiveLow,
 		ConsecutiveSurplus: c.consecutiveSurplus,
 		LastUpdate:         time.Now(),
@@ -867,6 +1012,8 @@ func (c *Controller) SetMode(mode Mode) {
 // "Force refresh" button to break out of MONITORING / WAKE_PENDING after an
 // external state change (e.g. another app released control of the vehicle).
 func (c *Controller) ForceRefresh(ctx context.Context) {
+	c.tickMu.Lock()
+	defer c.tickMu.Unlock()
 	c.mu.Lock()
 	c.hasCachedState = false
 	c.cachedChargeState = tesla.ChargeState{}
@@ -884,7 +1031,7 @@ func (c *Controller) ForceRefresh(ctx context.Context) {
 	}
 	c.mu.Unlock()
 	c.logger.InfoContext(ctx, "force refresh requested")
-	c.Tick(ctx)
+	c.tick(ctx)
 }
 
 // ManualSetAmps sets charging amps (manual mode only).
@@ -912,7 +1059,11 @@ func (c *Controller) ManualStart(ctx context.Context) error {
 	if mode != ModeManual {
 		return fmt.Errorf("controller: manual start requires manual mode")
 	}
-	return c.vehicle.StartCharging(ctx)
+	if err := c.vehicle.StartCharging(ctx); err != nil {
+		return err
+	}
+	c.requestChargeStateConfirmation()
+	return nil
 }
 
 // ManualStop stops charging (manual mode only).
@@ -926,7 +1077,11 @@ func (c *Controller) ManualStop(ctx context.Context) error {
 	if mode != ModeManual {
 		return fmt.Errorf("controller: manual stop requires manual mode")
 	}
-	return c.vehicle.StopCharging(ctx)
+	if err := c.vehicle.StopCharging(ctx); err != nil {
+		return err
+	}
+	c.requestChargeStateConfirmation()
+	return nil
 }
 
 // SetChargeLimit sets the vehicle's charge limit (percent). Available in both
@@ -952,6 +1107,15 @@ func (c *Controller) GetStateSnapshot() StateSnapshot {
 // GetAPIUsage returns the current Tesla API usage stats.
 func (c *Controller) GetAPIUsage() tesla.APIUsage {
 	return c.vehicle.GetAPIUsage()
+}
+
+// GetFleetStatus returns cached vehicle capabilities without polling Tesla.
+func (c *Controller) GetFleetStatus() (tesla.FleetStatus, error) {
+	provider, ok := c.vehicle.(tesla.FleetStatusProvider)
+	if !ok {
+		return tesla.FleetStatus{}, tesla.ErrVehicleUnavailable
+	}
+	return provider.GetFleetStatus()
 }
 
 // SetRefreshToken activates or updates the underlying Tesla controller.

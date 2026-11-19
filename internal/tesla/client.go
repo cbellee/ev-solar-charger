@@ -32,8 +32,6 @@ var regionBaseURLs = map[string]string{
 
 const authURL = "https://fleet-auth.prd.vn.cloud.tesla.com"
 
-const fleetStatusRefreshInterval = 6 * time.Hour
-
 var defaultWakeStatusCheckDelays = []time.Duration{10 * time.Second, 20 * time.Second}
 
 // TeslaClient implements VehicleController using the Tesla Fleet API.
@@ -54,18 +52,14 @@ type TeslaClient struct {
 	usage        *APIUsageTracker
 	wakeDelays   []time.Duration
 	// tokenPath is where rotated refresh tokens are persisted; empty disables.
-	tokenPath    string
-	mu           sync.Mutex
-	refreshMu    sync.Mutex
-	accessToken  string
-	refreshToken string
-	tokenExpiry  time.Time
-	fleetStatus  fleetStatusCache
-}
-
-type fleetStatusCache struct {
-	fetchedAt              time.Time
-	discountedDataEligible bool
+	tokenPath              string
+	mu                     sync.Mutex
+	refreshMu              sync.Mutex
+	accessToken            string
+	refreshToken           string
+	tokenExpiry            time.Time
+	fleetStatus            FleetStatus
+	fleetStatusInvalidated bool
 }
 
 // New creates a new TeslaClient.
@@ -127,6 +121,7 @@ func New(cfg config.Config, logger *slog.Logger, metrics *observability.Metrics)
 	if err := c.refreshAccessToken(context.Background()); err != nil {
 		return nil, fmt.Errorf("tesla: initial token refresh: %w", err)
 	}
+	c.refreshFleetStatusIfStale(context.Background())
 
 	return c, nil
 }
@@ -240,81 +235,6 @@ func isCommandPath(path string) bool {
 	return strings.Contains(path, "/command/") || strings.HasSuffix(path, "/wake_up")
 }
 
-func (c *TeslaClient) refreshFleetStatusIfStale(ctx context.Context) {
-	now := time.Now()
-
-	c.mu.Lock()
-	if !c.fleetStatus.fetchedAt.IsZero() && now.Sub(c.fleetStatus.fetchedAt) < fleetStatusRefreshInterval {
-		c.mu.Unlock()
-		return
-	}
-	// Rate-limit retries as well as successful refreshes.
-	c.fleetStatus.fetchedAt = now
-	c.mu.Unlock()
-
-	discounted, err := c.fetchFleetStatus(ctx)
-	if err != nil {
-		if c.logger != nil {
-			c.logger.Debug("tesla: fleet_status unavailable", "error", err)
-		}
-		return
-	}
-
-	c.mu.Lock()
-	c.fleetStatus.discountedDataEligible = discounted
-	c.mu.Unlock()
-}
-
-func (c *TeslaClient) fetchFleetStatus(ctx context.Context) (bool, error) {
-	path := "/api/1/vehicles/fleet_status"
-	body := map[string][]string{"vins": {c.vin}}
-	resp, err := c.doRequest(ctx, http.MethodPost, path, body)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	var envelope struct {
-		Response json.RawMessage `json:"response"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return false, fmt.Errorf("tesla: decode fleet_status: %w", err)
-	}
-
-	type fleetStatusEntry struct {
-		VIN                  string `json:"vin"`
-		DiscountedDeviceData bool   `json:"discounted_device_data"`
-	}
-
-	var single fleetStatusEntry
-	if err := json.Unmarshal(envelope.Response, &single); err == nil {
-		if single.VIN == "" || single.VIN == c.vin || bytes.Contains(envelope.Response, []byte(`"discounted_device_data"`)) {
-			return single.DiscountedDeviceData, nil
-		}
-	}
-
-	var many []fleetStatusEntry
-	if err := json.Unmarshal(envelope.Response, &many); err == nil && len(many) > 0 {
-		for _, entry := range many {
-			if entry.VIN == c.vin {
-				return entry.DiscountedDeviceData, nil
-			}
-		}
-		if len(many) == 1 {
-			return many[0].DiscountedDeviceData, nil
-		}
-	}
-
-	var byVIN map[string]fleetStatusEntry
-	if err := json.Unmarshal(envelope.Response, &byVIN); err == nil {
-		if entry, ok := byVIN[c.vin]; ok {
-			return entry.DiscountedDeviceData, nil
-		}
-	}
-
-	return false, fmt.Errorf("tesla: unrecognised fleet_status response")
-}
-
 func (c *TeslaClient) recordBillableResponse(path string, statusCode int) {
 	if statusCode >= http.StatusInternalServerError {
 		return
@@ -418,6 +338,7 @@ func (c *TeslaClient) doRequest(ctx context.Context, method, path string, body a
 
 // GetChargeState retrieves the vehicle's current charge state.
 func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
+	c.refreshFleetStatusIfStale(ctx)
 	path := fmt.Sprintf("/api/1/vehicles/%s/vehicle_data?endpoints=charge_state", c.vin)
 	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -468,8 +389,6 @@ func (c *TeslaClient) GetChargeState(ctx context.Context) (ChargeState, error) {
 		c.metrics.ChargeAmps.Record(ctx, int64(cs.AmpsActual))
 		c.metrics.BatteryPct.Record(ctx, cs.BatteryPct)
 	}
-
-	c.refreshFleetStatusIfStale(ctx)
 
 	return cs, nil
 }
@@ -596,7 +515,7 @@ func (c *TeslaClient) WakeUp(ctx context.Context) error {
 func (c *TeslaClient) GetAPIUsage() APIUsage {
 	usage := c.usage.Snapshot()
 	c.mu.Lock()
-	usage.DiscountedDataEligible = c.fleetStatus.discountedDataEligible
+	usage.DiscountedDataEligible = c.fleetStatus.DiscountedDataEligible
 	c.mu.Unlock()
 	return usage
 }
@@ -615,10 +534,19 @@ func (c *TeslaClient) SetRefreshToken(ctx context.Context, refreshToken string) 
 	}
 
 	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
 	c.mu.Lock()
 	c.refreshToken = refreshToken
 	c.mu.Unlock()
 
-	return c.refreshAccessTokenLocked(ctx)
+	err := c.refreshAccessTokenLocked(ctx)
+	c.refreshMu.Unlock()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.fleetStatusInvalidated = true
+	c.fleetStatus.LastAttemptAt = time.Time{}
+	c.mu.Unlock()
+	c.refreshFleetStatusIfStale(ctx)
+	return nil
 }

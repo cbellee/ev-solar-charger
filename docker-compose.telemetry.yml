@@ -1,0 +1,63 @@
+services:
+  solar-ev-charger:
+    environment:
+      TESLA_TELEMETRY_MQTT_URL: tcp://telemetry-mqtt:1883
+    networks:
+      - default
+      - telemetry
+    depends_on:
+      telemetry-mqtt:
+        condition: service_healthy
+
+  telemetry-mqtt:
+    image: eclipse-mosquitto:2.0.22
+    volumes:
+      - ./deploy/telemetry/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - telemetry
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "127.0.0.1", "-t", "healthcheck", "-n"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  fleet-telemetry:
+    image: tesla/fleet-telemetry:v0.10.0
+    command: ["/fleet-telemetry", "-config=/etc/fleet-telemetry/config.json"]
+    ports:
+      - "8443:8443"
+      - "127.0.0.1:19090:9090"
+      - "127.0.0.1:19091:8081"
+    volumes:
+      - ./deploy/telemetry/receiver.json:/etc/fleet-telemetry/config.json:ro
+      - ./data/telemetry/tls:/certificates:ro
+    networks:
+      - default
+      - telemetry
+    depends_on:
+      telemetry-mqtt:
+        condition: service_healthy
+    restart: unless-stopped
+
+  telemetry-acme:
+    image: goacme/lego:v5.6.0
+    profiles: ["telemetry-tools"]
+    entrypoint:
+      - /lego
+      - run
+      - --path=/acme
+      - --dns=cloudflare
+      - --domains=telemetry.ev.bellee.net
+      - --email=${TELEMETRY_ACME_EMAIL:?Set TELEMETRY_ACME_EMAIL in .env}
+      - --accept-tos
+      - --key-type=EC256
+    environment:
+      CF_DNS_API_TOKEN_FILE: /run/secrets/cloudflare_dns_api_token
+    volumes:
+      - ./data/telemetry/acme:/acme
+      - ./data/telemetry/cloudflare-dns-api-token:/run/secrets/cloudflare_dns_api_token:ro
+
+networks:
+  telemetry:
+    internal: true

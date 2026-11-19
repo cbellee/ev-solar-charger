@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/cbellee/ev-solar-charger/internal/inverter"
 	"github.com/cbellee/ev-solar-charger/internal/observability"
 	"github.com/cbellee/ev-solar-charger/internal/storage"
+	"github.com/cbellee/ev-solar-charger/internal/telemetry"
 	"github.com/cbellee/ev-solar-charger/internal/tesla"
 	"github.com/cbellee/ev-solar-charger/internal/web"
 	"golang.org/x/crypto/acme/autocert"
@@ -273,6 +275,16 @@ func runWithContext(parent context.Context, deps runtimeDeps) error {
 
 	// 11. Create web server.
 	handler := deps.newServer(ctrl, store, hub, logger, authenticator, cfg)
+
+	var telemetryWG sync.WaitGroup
+	defer func() {
+		cancel()
+		telemetryWG.Wait()
+	}()
+	if cfg.TelemetryMQTTURL != "" && !cfg.TeslaTestMode {
+		consumer := telemetry.NewConsumer(cfg.TelemetryMQTTURL, cfg.TeslaVIN, ctrl.RequestVehicleRefresh, logger)
+		telemetryWG.Go(func() { consumer.Run(ctx) })
+	}
 
 	// 11. Start controller loop.
 	go ctrl.Run(ctx)

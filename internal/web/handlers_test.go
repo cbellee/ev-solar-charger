@@ -34,7 +34,13 @@ type recordingStore struct {
 	samplePoints  int
 }
 
-func (s *recordingStore) Migrate(ctx context.Context) error                          { return nil }
+func (s *recordingStore) Migrate(ctx context.Context) error { return nil }
+func (s *recordingStore) SaveVehicleObservation(ctx context.Context, observation storage.VehicleObservation) error {
+	return nil
+}
+func (s *recordingStore) LoadVehicleObservation(ctx context.Context, vin string) (*storage.VehicleObservation, error) {
+	return nil, nil
+}
 func (s *recordingStore) InsertReading(ctx context.Context, r storage.Reading) error { return nil }
 func (s *recordingStore) QueryReadings(ctx context.Context, f storage.ReadingFilter) ([]storage.Reading, error) {
 	s.readingFilter = f
@@ -510,7 +516,13 @@ func Test_parseIntParam_valid(t *testing.T) {
 // nullStore implements storage.Store for handler tests.
 type nullStore struct{}
 
-func (s *nullStore) Migrate(ctx context.Context) error                          { return nil }
+func (s *nullStore) Migrate(ctx context.Context) error { return nil }
+func (s *nullStore) SaveVehicleObservation(ctx context.Context, observation storage.VehicleObservation) error {
+	return nil
+}
+func (s *nullStore) LoadVehicleObservation(ctx context.Context, vin string) (*storage.VehicleObservation, error) {
+	return nil, nil
+}
 func (s *nullStore) InsertReading(ctx context.Context, r storage.Reading) error { return nil }
 func (s *nullStore) QueryReadings(ctx context.Context, f storage.ReadingFilter) ([]storage.Reading, error) {
 	return []storage.Reading{}, nil

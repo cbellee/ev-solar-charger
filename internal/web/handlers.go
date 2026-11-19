@@ -70,6 +70,18 @@ func handleState(ctrl *controller.Controller) http.HandlerFunc {
 	}
 }
 
+func handleFleetStatus(ctrl *controller.Controller) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status, err := ctrl.GetFleetStatus()
+		if err != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "vehicle telemetry diagnostics unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(status)
+	}
+}
+
 func handleEntraConfig(cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -264,8 +266,14 @@ func Test_GetChargeState_refreshesFleetStatusCache(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"response": map[string]any{
-				"vin":                    "TEST_VIN",
-				"discounted_device_data": true,
+				"key_paired_vins": []string{"TEST_VIN"},
+				"vehicle_info": map[string]any{
+					"TEST_VIN": map[string]any{
+						"firmware_version":        "2026.38",
+						"fleet_telemetry_version": "1.0.0",
+						"discounted_device_data":  true,
+					},
+				},
 			},
 		})
 	})
@@ -286,6 +294,167 @@ func Test_GetChargeState_refreshesFleetStatusCache(t *testing.T) {
 	}
 	if usage.DataCalls != 2 {
 		t.Fatalf("DataCalls = %d, want 2 charge-state calls only", usage.DataCalls)
+	}
+	status, err := c.GetFleetStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.KeyPaired == nil || !*status.KeyPaired || status.FleetTelemetryVersion != "1.0.0" {
+		t.Fatalf("unexpected telemetry capabilities: %+v", status)
+	}
+	if status.FetchedAt.IsZero() || status.LastAttemptAt.IsZero() || status.LastError != "" {
+		t.Fatalf("unexpected cache metadata: %+v", status)
+	}
+}
+
+func Test_decodeFleetStatus_responseShapes(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantErr      bool
+		paired       bool
+		pairingKnown bool
+	}{
+		{
+			name:         "nested paired vehicle",
+			body:         `{"key_paired_vins":["OTHER","TEST_VIN"],"vehicle_info":{"TEST_VIN":{"fleet_telemetry_version":"1.0","discounted_device_data":true}}}`,
+			paired:       true,
+			pairingKnown: true,
+		},
+		{
+			name:         "nested unpaired vehicle",
+			body:         `{"unpaired_vins":["TEST_VIN"],"vehicle_info":{"TEST_VIN":{"discounted_device_data":true}}}`,
+			pairingKnown: true,
+		},
+		{name: "flat", body: `{"vin":"TEST_VIN","discounted_device_data":true}`},
+		{name: "VIN map", body: `{"TEST_VIN":{"discounted_device_data":true}}`},
+		{name: "list selects VIN", body: `[{"vin":"OTHER","discounted_device_data":false},{"vin":"TEST_VIN","discounted_device_data":true}]`},
+		{name: "wrong VIN", body: `{"vin":"OTHER","discounted_device_data":true}`, wantErr: true},
+		{name: "wrong VIN in list", body: `[{"vin":"OTHER","discounted_device_data":true}]`, wantErr: true},
+		{name: "missing nested VIN", body: `{"vehicle_info":{"OTHER":{"discounted_device_data":true}}}`, wantErr: true},
+		{name: "empty", body: `{}`, wantErr: true},
+		{name: "null", body: `null`, wantErr: true},
+		{name: "null capability", body: `{"fleet_telemetry_version":null}`, wantErr: true},
+		{name: "invalid field type", body: `{"discounted_device_data":"yes"}`, wantErr: true},
+		{name: "invalid JSON", body: `{`, wantErr: true},
+		{
+			name:    "conflicting key pairing",
+			body:    `{"key_paired_vins":["TEST_VIN"],"unpaired_vins":["TEST_VIN"],"vehicle_info":{"TEST_VIN":{"discounted_device_data":true}}}`,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeFleetStatus(json.RawMessage(tt.body), "TEST_VIN")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("decodeFleetStatus error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if !got.DiscountedDataEligible {
+				t.Fatal("configured vehicle discount flag was lost")
+			}
+			if (got.KeyPaired != nil) != tt.pairingKnown ||
+				(got.KeyPaired != nil && *got.KeyPaired != tt.paired) {
+				t.Fatalf("KeyPaired = %v, want %v", got.KeyPaired, tt.paired)
+			}
+		})
+	}
+}
+
+func Test_FleetStatus_failureRetryPreservesCapabilities(t *testing.T) {
+	var calls int
+	fail := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/1/vehicles/fleet_status", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if fail {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"response":{"discounted_device_data":true,"fleet_telemetry_version":"1.0"}}`))
+	})
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+	c.refreshFleetStatusIfStale(context.Background())
+	c.mu.Lock()
+	c.fleetStatus.FetchedAt = time.Now().Add(-fleetStatusRefreshInterval)
+	c.fleetStatus.LastAttemptAt = c.fleetStatus.FetchedAt
+	lastSuccess := c.fleetStatus.FetchedAt
+	c.mu.Unlock()
+
+	fail = true
+	c.refreshFleetStatusIfStale(context.Background())
+	c.refreshFleetStatusIfStale(context.Background())
+	status, _ := c.GetFleetStatus()
+	if calls != 2 || status.LastError == "" || !status.FetchedAt.Equal(lastSuccess) || !status.DiscountedDataEligible {
+		t.Fatalf("failed refresh lost status or bypassed backoff: calls=%d, status=%+v", calls, status)
+	}
+	c.mu.Lock()
+	c.fleetStatus.LastAttemptAt = time.Now().Add(-fleetStatusRetryInterval)
+	c.mu.Unlock()
+	fail = false
+	c.refreshFleetStatusIfStale(context.Background())
+	status, _ = c.GetFleetStatus()
+	if calls != 3 || status.LastError != "" || !status.FetchedAt.After(lastSuccess) {
+		t.Fatalf("retry did not recover: calls=%d, status=%+v", calls, status)
+	}
+}
+
+func Test_FleetStatus_concurrentRefreshAndCachedReads(t *testing.T) {
+	var calls atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"response":{"discounted_device_data":true}}`))
+	})
+	c, _ := newTestClient(t, handler, defaultAuthHandler())
+	c.tokenExpiry = time.Now().Add(time.Hour)
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() {
+			c.refreshFleetStatusIfStale(context.Background())
+			if _, err := c.GetFleetStatus(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fleet_status calls = %d, want 1 shared refresh", got)
+	}
+}
+
+func Test_GetChargeState_checksCapabilitiesWhenOffline(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/1/vehicles/TEST_VIN/vehicle_data", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusRequestTimeout)
+	})
+	mux.HandleFunc("/api/1/vehicles/fleet_status", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"response":{"firmware_version":"2026.38"}}`))
+	})
+	c, _ := newTestClient(t, mux, defaultAuthHandler())
+	if _, err := c.GetChargeState(context.Background()); !errors.Is(err, ErrCarOffline) {
+		t.Fatalf("GetChargeState error = %v, want ErrCarOffline", err)
+	}
+	status, _ := c.GetFleetStatus()
+	if status.FirmwareVersion != "2026.38" || status.FetchedAt.IsZero() {
+		t.Fatalf("offline car prevented capability discovery: %+v", status)
+	}
+}
+
+func Test_SetRefreshToken_refreshesFleetStatus(t *testing.T) {
+	var calls int
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"response":{"discounted_device_data":false}}`))
+	})
+	c, _ := newTestClient(t, handler, defaultAuthHandler())
+	c.refreshFleetStatusIfStale(context.Background())
+	if err := c.SetRefreshToken(context.Background(), "replacement-token"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("fleet_status calls = %d, want refresh after authentication", calls)
 	}
 }
 

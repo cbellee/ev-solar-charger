@@ -25,6 +25,7 @@ func NewServer(ctrl *controller.Controller, store storage.Store, hub *Hub, logge
 	apiMux := http.NewServeMux()
 
 	apiMux.HandleFunc("GET /api/state", handleState(ctrl))
+	apiMux.HandleFunc("GET /api/telemetry/status", handleFleetStatus(ctrl))
 	apiMux.Handle("GET /events", hub)
 	apiMux.HandleFunc("POST /api/control", handleControl(ctrl))
 	apiMux.HandleFunc("POST /api/mode", handleMode(ctrl))

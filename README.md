@@ -379,6 +379,7 @@ Workflow behavior:
 
 - Pull requests: build validation only (no push)
 - Push to main: build and push image to GHCR
+- Push to feat/*: build and push a branch-tagged image (for example, `feat/fleet-telemetry` publishes `feat-fleet-telemetry`); does not update `latest`
 - Tag push v*: build and push versioned image
 - Manual dispatch: supported
 
@@ -624,6 +625,7 @@ The `__Host-` cookies need HTTPS, so the session cookie is not used on plain
 
 - GET /: dashboard
 - GET /api/state: current snapshot
+- GET /api/telemetry/status: cached Tesla capability diagnostics, pairing status, and refresh timestamps/errors; authenticated and does not poll or wake the car (503 when no real vehicle client is active)
 - GET /events: SSE stream
 - POST /api/control: manual control commands
 - POST /api/mode: switch auto/manual mode
@@ -655,6 +657,8 @@ go build ./...
 
 ## Additional Documentation
 
+- [Fleet Telemetry NAS setup](docs/fleet-telemetry-setup.md): opt-in receiver/MQTT stack, Cloudflare certificates, direct TCP forwarding, and event-triggered REST refresh
+- [Fleet Telemetry migration and API usage monitoring](docs/fleet-telemetry-monitoring.md): implementation status, cached capability diagnostics, and remaining push-event work
 - instructions.md: setup, NAS deployment, TLS, DNS, troubleshooting
 - plan.md: implementation planning notes
 - updates.md: implementation update log

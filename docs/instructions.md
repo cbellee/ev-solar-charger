@@ -699,6 +699,40 @@ A single-page React application (Vite + TypeScript + Tailwind) is served at `/` 
 
 The SPA acquires an ID token via MSAL.js and attaches `Authorization: Bearer …` to every protected request. Live updates flow over an SSE stream at `/events`.
 
+An offline vehicle response means data is unavailable, not that the cable is
+disconnected or the battery is empty. The latest successful online vehicle
+reading is saved in SQLite for the configured VIN and survives app restarts.
+While offline, the dashboard labels any restored plug, battery, charging-state,
+and charge-limit values **last known**. With no confirmed reading, it shows
+**Unknown**, not zeroes or the charge slider's internal 80% fallback. Actual
+current and time-to-limit are not shown as live measurements while offline,
+and the power-flow diagram does not animate historical charging.
+
+**Solar updated** and **Vehicle last confirmed** are separate timestamps.
+Reusing a cached reading never advances the vehicle timestamp. The snapshot
+includes `vehicleDataStatus` (`current`, `last_known`, or `unknown`) and
+`vehicleObservedAt` (an observation timestamp, or `null`). `current` means the
+latest REST read succeeded online; its age is still given by
+`vehicleObservedAt`. When status is `last_known`, the existing vehicle fields
+are historical values and `carOnline` remains false.
+
+On an offline startup, the controller makes at most three additional recovery
+reads, waiting 1, then 2, then 5 minutes between attempts (approximately 1, 3,
+and 8 minutes after the initial read, plus tick/API latency). A successful online
+read ends startup recovery. Telemetry-triggered reads share this startup budget
+and coalesce with a due recovery read; telemetry hints can still request reads
+afterward under their normal throttle. Exhausting the budget returns to normal
+idle polling, or the existing error backoff for non-offline failures.
+An offline response following a saved `Complete` reading younger than
+`PLUGGED_IN_STALE_AFTER_SECONDS` skips the accelerated startup reads.
+
+Recovery does not reset command cooldowns or send wake commands. Restored data
+is display-only and never grants wake eligibility or resumes charging. A new
+successful online read still feeds the normal automatic charging decisions.
+A confirmed `Complete` charging state can remain plugged in; it is not the same
+as `Disconnected`. Storage failures are logged explicitly; fresh REST readings
+remain usable in memory if persistence is unavailable.
+
 ### API Endpoints
 
 All `/api/*` and `/events` routes require a valid Microsoft Entra ID ID token whose `oid` claim is listed in `ENTRA_ALLOWED_OIDS`, or a valid server session cookie (`__Host-ev_session`, issued by `/auth/session`; see the README). Cookie-authenticated `POST` requests must also send `X-Requested-With`. Tokens are read from the `Authorization` header only; `?access_token=` query parameters are rejected. Open `/events` streams are closed when the ID token expires or, for cookie sessions, within a minute of sign-out or session expiry. Public routes are explicitly marked.

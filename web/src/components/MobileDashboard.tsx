@@ -3,8 +3,8 @@ import clsx from "clsx";
 import type { StateSnapshot } from "@/api/types";
 import { ChargeLimitCard } from "@/components/ChargeLimitCard";
 import { useChargerControls } from "@/hooks/useChargerControls";
-import { formatKW } from "@/lib/format";
-import { batteryProgress, gridBadge, statusBanner } from "@/lib/mobileStatus";
+import { formatKW, formatTime } from "@/lib/format";
+import { batteryProgress, gridBadge, hasVehicleReading, statusBanner, vehicleStatus } from "@/lib/mobileStatus";
 
 const MIN_AMPS = 5;
 const MAX_AMPS = 32;
@@ -50,9 +50,9 @@ export function MobileDashboard({ snap }: { snap: StateSnapshot }) {
         <FooterStat label="Mode" value={snap.mode} />
         <FooterStat
           label="Vehicle"
-          value={snap.carPluggedIn ? (snap.carOnline ? "online" : "offline") : "unplugged"}
+          value={vehicleStatus(snap)}
         />
-        <FooterStat label="Updated" value={formatClock(snap.lastUpdate)} />
+        <FooterStat label="Solar updated" value={formatClock(snap.lastUpdate)} />
       </dl>
     </div>
   );
@@ -69,36 +69,49 @@ function Panel({ title, children }: { title?: string; children: React.ReactNode 
 
 function EVHero({ snap }: { snap: StateSnapshot }) {
   const p = batteryProgress(snap);
+  const known = hasVehicleReading(snap);
   return (
     <Panel>
       <div className="flex items-center gap-4">
         <img src="/images/tesla_ev.png" alt="Tesla" className="h-20 w-28 object-contain" />
         <div className="min-w-0">
-          <div className="text-5xl font-bold tabular-nums">{p.pct}%</div>
+          <div className="text-5xl font-bold tabular-nums">{known ? `${p.pct}%` : "—"}</div>
           <div className="text-base text-gray-400">{p.caption}</div>
         </div>
       </div>
-      <div
-        className="relative mt-4 h-4 overflow-hidden rounded-full bg-gray-700"
-        role="progressbar"
-        aria-label="Battery"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={p.pct}
-      >
-        <div className="h-full bg-green-500" style={{ width: `${p.pct}%` }} />
-        {p.limitPct > 0 && (
+      <p className="mt-3 text-sm text-gray-400">
+        Vehicle last confirmed: {formatTime(snap.vehicleObservedAt ?? "")}
+      </p>
+      {!snap.carOnline && known && (
+        <p className="text-sm text-gray-400">
+          Plugged in: {snap.carPluggedIn ? "Yes" : "No"} (last known)
+        </p>
+      )}
+      {known && (
+        <>
           <div
-            className="absolute inset-y-0 w-0.5 bg-white"
-            style={{ left: `${p.limitPct}%` }}
-            title={`Charge limit ${p.limitPct}%`}
-          />
-        )}
-      </div>
-      <div className="mt-1 flex justify-between text-sm text-gray-400">
-        <span>0%</span>
-        <span>limit {p.limitPct}%</span>
-      </div>
+            className="relative mt-4 h-4 overflow-hidden rounded-full bg-gray-700"
+            role="progressbar"
+            aria-label={snap.carOnline ? "Battery" : "Battery (last known)"}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={p.pct}
+          >
+            <div className={clsx("h-full", snap.carOnline ? "bg-green-500" : "bg-gray-500")} style={{ width: `${p.pct}%` }} />
+            {p.limitPct > 0 && (
+              <div
+                className="absolute inset-y-0 w-0.5 bg-white"
+                style={{ left: `${p.limitPct}%` }}
+                title={`Charge limit ${p.limitPct}%`}
+              />
+            )}
+          </div>
+          <div className="mt-1 flex justify-between text-sm text-gray-400">
+            <span>0%</span>
+            <span>limit {p.limitPct}%{snap.carOnline ? "" : " (last known)"}</span>
+          </div>
+        </>
+      )}
     </Panel>
   );
 }

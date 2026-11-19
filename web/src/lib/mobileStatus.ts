@@ -13,6 +13,15 @@ const BANNER_BG: Record<ControllerState, string> = {
   idle: "bg-gray-700 text-gray-100",
 };
 
+export function vehicleStatus(snap: StateSnapshot): string {
+  if (!snap.carOnline) return "offline";
+  return snap.carPluggedIn ? "online" : "unplugged";
+}
+
+export function hasVehicleReading(snap: StateSnapshot): boolean {
+  return snap.carOnline || snap.vehicleDataStatus === "last_known";
+}
+
 export function statusBanner(snap: StateSnapshot): { label: string; className: string } {
   const labels: Record<ControllerState, string> = {
     charging: `Charging · ${snap.actualAmps} A`,
@@ -20,7 +29,7 @@ export function statusBanner(snap: StateSnapshot): { label: string; className: s
     monitoring: "Monitoring",
     wake_pending: "Waking car",
     error: "Error",
-    idle: snap.carPluggedIn ? "Idle" : "Unplugged",
+    idle: !snap.carOnline ? "Vehicle offline" : snap.carPluggedIn ? "Idle" : "Unplugged",
   };
   return { label: labels[snap.state], className: BANNER_BG[snap.state] };
 }
@@ -43,7 +52,11 @@ export function batteryProgress(snap: StateSnapshot): {
   const limitPct = clampPct(snap.chargeLimit);
 
   let caption: string;
-  if (!snap.carPluggedIn) {
+  if (!snap.carOnline) {
+    caption = hasVehicleReading(snap)
+      ? `Last known: ${snap.chargingState || "Unknown"}`
+      : "Vehicle offline";
+  } else if (!snap.carPluggedIn) {
     caption = "Not plugged in";
   } else if (limitPct > 0 && pct >= limitPct) {
     caption = `limit ${limitPct}% reached`;

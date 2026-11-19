@@ -1,0 +1,28 @@
+{
+  "host": "0.0.0.0",
+  "port": 8443,
+  "status_port": 8081,
+  "log_level": "info",
+  "json_log_enable": true,
+  "namespace": "tesla",
+  "monitoring": {
+    "prometheus_metrics_host": "0.0.0.0",
+    "prometheus_metrics_port": 9090
+  },
+  "mqtt": {
+    "broker": "telemetry-mqtt:1883",
+    "client_id": "fleet-telemetry",
+    "topic_base": "tesla",
+    "qos": 1,
+    "retained": false
+  },
+  "records": {
+    "V": ["mqtt"],
+    "connectivity": ["mqtt"],
+    "errors": ["logger"]
+  },
+  "tls": {
+    "server_cert": "/certificates/tls.crt",
+    "server_key": "/certificates/tls.key"
+  }
+}
